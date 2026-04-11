@@ -1,5 +1,7 @@
+from config.config import load_settings
+
 
 if __name__ == '__main__':
-    print_hi('PyCharm')
+    settings = load_settings()
+    print(settings)
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
