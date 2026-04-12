@@ -120,6 +120,42 @@ class MexcClient:
             private=True,
         )
 
+    # Открытые лимитные ордера
+    def get_open_orders(self, symbol: str | None = None) -> dict[str, Any]:
+        params = {"symbol": symbol} if symbol else {}
+        return self._request(
+            "GET",
+            "/api/v1/private/order/list/open_orders",
+            params=params,
+            private=True,
+        )
+
+    # Отменяем лимитные ордера
+    def cancel_limit_orders_by_symbol(self, symbol: str) -> dict[str, Any]:
+        open_orders = self.get_open_orders(symbol)
+
+        if not open_orders.get("success"):
+            return open_orders
+
+        limit_order_ids: list[int] = []
+
+        for item in open_orders.get("data", []):
+            order_type = int(item.get("orderType", 0) or 0)
+
+            if order_type in (1, 2):
+                limit_order_ids.append(int(item["orderId"]))
+
+        if not limit_order_ids:
+            return {
+                "success": True,
+                "code": 0,
+                "data": [],
+                "message": f"No open limit orders for {symbol}",
+            }
+
+        return self.cancel_orders(limit_order_ids)
+
+
     def place_order(
             self,
             *,
@@ -181,6 +217,7 @@ class MexcClient:
             take_profit_price=take_profit_price,
         )
 
+    # отменяет любой ордер
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -230,3 +267,127 @@ class MexcClient:
         steps = (value / vol_unit).to_integral_value(rounding=ROUND_DOWN)
         normalized = steps * vol_unit
         return float(normalized)
+
+    # получаем детали комиссий для символа
+    def get_fee_details(self, symbol: str | None = None) -> dict[str, Any]:
+        params = {"symbol": symbol} if symbol else {}
+        return self._request(
+            "GET",
+            "/api/v1/private/account/tiered_fee_rate/v2",
+            params=params,
+            private=True,
+        )
+
+    # Получаем комиcии выбранного символа
+    def get_symbol_fee_rates(self, symbol: str) -> dict[str, float]:
+        response = self.get_fee_details(symbol)
+
+        if not response.get("success"):
+            raise ValueError(f"Failed to get fee details for {symbol}: {response}")
+
+        data = response.get("data") or {}
+
+        real_maker_fee = data.get("realMakerFee")
+        real_taker_fee = data.get("realTakerFee")
+
+        if real_maker_fee is None or real_taker_fee is None:
+            raise ValueError(f"Fee fields not found for {symbol}: {data}")
+
+        return {
+            "maker": float(real_maker_fee),
+            "taker": float(real_taker_fee),
+        }
+
+    # Перемешаем позицию в безубыток, учитываем комиссию
+    def move_stop_loss_to_break_even_with_symbol_fee(
+            self,
+            symbol: str,
+            *,
+            entry_fee_type: str = "maker",
+            exit_fee_type: str = "taker",
+            use_hold_avg_price: bool = False,
+    ) -> dict[str, Any]:
+        position = self.get_position(symbol)
+        if position is None:
+            return {
+                "success": False,
+                "error": f"Open position not found for {symbol}",
+            }
+
+        entry_price_raw = (
+            position.get("holdAvgPrice")
+            if use_hold_avg_price
+            else position.get("openAvgPrice")
+        )
+
+        if entry_price_raw is None:
+            return {
+                "success": False,
+                "error": f"Entry price not found for {symbol}",
+            }
+
+        fee_rates = self.get_symbol_fee_rates(symbol)
+
+        if entry_fee_type not in fee_rates:
+            return {
+                "success": False,
+                "error": f"Unknown entry_fee_type: {entry_fee_type}",
+            }
+
+        if exit_fee_type not in fee_rates:
+            return {
+                "success": False,
+                "error": f"Unknown exit_fee_type: {exit_fee_type}",
+            }
+
+        open_fee_rate = fee_rates[entry_fee_type]
+        close_fee_rate = fee_rates[exit_fee_type]
+
+        position_id = int(position["positionId"])
+        hold_vol = float(position["holdVol"])
+        position_type = int(position["positionType"])
+
+        is_long = position_type == 1
+        loss_trend = 1 if is_long else 2
+
+        be_price = self.calculate_break_even_price(
+            symbol=symbol,
+            entry_price=float(entry_price_raw),
+            is_long=is_long,
+            open_fee_rate=open_fee_rate,
+            close_fee_rate=close_fee_rate,
+        )
+
+        current_stop = self.get_position_stop_order(position_id, symbol)
+
+        if current_stop:
+            stop_plan_order_id = int(current_stop["id"])
+
+            return self.change_position_stop_order(
+                stop_plan_order_id=stop_plan_order_id,
+                stop_loss_price=be_price,
+                take_profit_price=current_stop.get("takeProfitPrice"),
+                loss_trend=loss_trend,
+                profit_trend=int(current_stop.get("profitTrend", 1) or 1),
+            )
+
+        return self.place_position_stop_order(
+            position_id=position_id,
+            vol=hold_vol,
+            stop_loss_price=be_price,
+            take_profit_price=None,
+            loss_trend=loss_trend,
+            profit_trend=1,
+            vol_type=2,
+            stop_loss_type=0,
+        )
+
+    # Обертка под метод перевода SL в безубыток
+    def move_stop_loss_to_break_even(self, symbol: str) -> dict[str, Any]:
+        return self.move_stop_loss_to_break_even_with_symbol_fee(
+            symbol,
+            entry_fee_type="maker",
+            exit_fee_type="taker",
+        )
+
+    
