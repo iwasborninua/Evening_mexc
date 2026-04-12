@@ -33,6 +33,7 @@ class MexcClient:
     def _now_ms(self) -> str:
         return str(int(time.time() * 1000))
 
+    # Построитель запроса
     def _build_query_string(self, params: dict[str, Any] | None) -> str:
         if not params:
             return ""
@@ -155,7 +156,7 @@ class MexcClient:
 
         return self.cancel_orders(limit_order_ids)
 
-
+    # Размещение позиции
     def place_order(
             self,
             *,
@@ -189,7 +190,7 @@ class MexcClient:
             params=payload,
             private=True,
         )
-
+    # Обертка для размещения ордера
     def place_limit_order(
             self,
             *,
@@ -229,6 +230,7 @@ class MexcClient:
     # Список текущих позиций
     def get_contracts(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/contract/detail")
+
 
     def get_contract_by_symbol(self, symbol: str) -> dict[str, Any] | None:
         response = self.get_contracts()
@@ -278,7 +280,7 @@ class MexcClient:
             private=True,
         )
 
-    # Получаем комиcии выбранного символа
+    # Получаем комиссии выбранного символа
     def get_symbol_fee_rates(self, symbol: str) -> dict[str, float]:
         response = self.get_fee_details(symbol)
 
@@ -390,4 +392,104 @@ class MexcClient:
             exit_fee_type="taker",
         )
 
-    
+    # Частичное закрытие позиции
+    def close_position_partially(self, symbol: str, percent: int) -> dict[str, Any]:
+        if percent <= 0 or percent > 100:
+            return {
+                "success": False,
+                "error": f"Percent must be in range 1..100. Got: {percent}",
+            }
+
+        position = self.get_position(symbol)
+        if position is None:
+            return {
+                "success": False,
+                "error": f"Open position not found for {symbol}",
+            }
+
+        hold_vol = Decimal(str(position.get("holdVol", 0) or 0))
+        if hold_vol <= 0:
+            return {
+                "success": False,
+                "error": f"Position volume is empty for {symbol}",
+            }
+
+        contract = self.get_contract_by_symbol(symbol)
+        if not contract:
+            return {
+                "success": False,
+                "error": f"Contract not found: {symbol}",
+            }
+
+        vol_unit = Decimal(str(contract["volUnit"]))
+        min_vol = Decimal(str(contract["minVol"]))
+
+        raw_close_vol = hold_vol * Decimal(str(percent)) / Decimal("100")
+        steps = (raw_close_vol / vol_unit).to_integral_value(rounding=ROUND_DOWN)
+        close_vol = steps * vol_unit
+
+        if close_vol < min_vol:
+            close_vol = min_vol
+
+        if close_vol > hold_vol:
+            close_vol = hold_vol
+
+        position_type = int(position.get("positionType", 0) or 0)
+
+        # 1 = long, 2 = short
+        if position_type == 1:
+            close_side = 4
+        elif position_type == 2:
+            close_side = 2
+        else:
+            return {
+                "success": False,
+                "error": f"Unknown positionType for {symbol}: {position_type}",
+            }
+
+        return self.place_order(
+            symbol=symbol,
+            price=0,
+            vol=float(close_vol),
+            side=close_side,
+            order_type=5,
+            open_type=2,
+        )
+
+
+    def get_position(self, symbol: str) -> dict[str, Any] | None:
+        response = self.get_open_positions(symbol)
+
+        if not response.get("success"):
+            return None
+
+        for item in response.get("data", []):
+            hold_vol = float(item.get("holdVol", 0) or 0)
+            if item.get("symbol") == symbol and hold_vol > 0:
+                return item
+
+        return None
+
+    def handle_tp_partial_close(self, symbol: str, percent: int) -> dict[str, Any]:
+        close_result = self.close_position_partially(symbol, percent)
+        if close_result.get("success") is False:
+            return {
+                "success": False,
+                "step": "close_position_partially",
+                "details": close_result,
+            }
+
+        cancel_result = self.cancel_limit_orders_by_symbol(symbol)
+        if cancel_result.get("success") is False:
+            return {
+                "success": False,
+                "step": "cancel_limit_orders_by_symbol",
+                "details": cancel_result,
+            }
+
+        return {
+            "success": True,
+            "step": "handle_tp_partial_close",
+            "close_result": close_result,
+            "cancel_result": cancel_result,
+        }
