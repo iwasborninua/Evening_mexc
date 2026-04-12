@@ -1,10 +1,15 @@
 from config.config import load_settings
 from mexc.client import MexcClient
+import time
 
 
 if __name__ == '__main__':
+    start = time.perf_counter()
     settings = load_settings()
     client = MexcClient(settings)
+
+    client.ping()
+    client.load_contracts_cache()
 
     order_1 = client.place_limit_short(
         symbol="BTC_USDT",
@@ -26,3 +31,7 @@ if __name__ == '__main__':
 
     print("ORDER 1:", order_1)
     print("ORDER 2:", order_2)
+
+    elapsed = time.perf_counter() - start
+
+    print(f"Elapsed: {elapsed:.3f}s")

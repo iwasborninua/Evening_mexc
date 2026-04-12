@@ -23,6 +23,8 @@ class MexcClient:
 
 
     def __init__(self, settings: Settings) -> None:
+        self._contracts_cache: dict[str, dict[str, Any]] = {}
+
         self.base_url = settings.mexc_base_url.rstrip("/")
         self.api_key = settings.mexc_api_key
         self.api_secret = settings.mexc_api_secret
@@ -31,6 +33,18 @@ class MexcClient:
         self.session.headers.update({
             "Content-Type": "application/json",
         })
+
+    def load_contracts_cache(self) -> None:
+        response = self.get_contracts()
+
+        if not response.get("success"):
+            raise ValueError(f"Failed to load contracts: {response}")
+
+        self._contracts_cache = {
+            item["symbol"]: item
+            for item in response.get("data", [])
+            if item.get("symbol")
+        }
 
     def _private_headers(self, timestamp: str, signature: str) -> dict[str, str]:
         return {
@@ -243,18 +257,11 @@ class MexcClient:
     def get_contracts(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/contract/detail")
 
-
     def get_contract_by_symbol(self, symbol: str) -> dict[str, Any] | None:
-        response = self.get_contracts()
+        if not self._contracts_cache:
+            self.load_contracts_cache()
 
-        if not response.get("success"):
-            return None
-
-        for item in response.get("data", []):
-            if item.get("symbol") == symbol:
-                return item
-
-        return None
+        return self._contracts_cache.get(symbol)
 
     def normalize_price(self, symbol: str, price: float) -> float:
         contract = self.get_contract_by_symbol(symbol)
