@@ -10,6 +10,18 @@ import requests
 from config.config import Settings
 
 class MexcClient:
+    SIDE_OPEN_LONG = 1
+    SIDE_CLOSE_SHORT = 2
+    SIDE_OPEN_SHORT = 3
+    SIDE_CLOSE_LONG = 4
+
+    ORDER_TYPE_LIMIT = 1
+    ORDER_TYPE_MARKET = 5
+
+    OPEN_TYPE_ISOLATED = 1
+    OPEN_TYPE_CROSS = 2
+
+
     def __init__(self, settings: Settings) -> None:
         self.base_url = settings.mexc_base_url.rstrip("/")
         self.api_key = settings.mexc_api_key
@@ -493,3 +505,87 @@ class MexcClient:
             "close_result": close_result,
             "cancel_result": cancel_result,
         }
+
+    def place_limit_long(
+            self,
+            *,
+            symbol: str,
+            price: float,
+            vol: float,
+            leverage: int,
+            open_type: int = OPEN_TYPE_ISOLATED,
+            stop_loss_price: float | None = None,
+            take_profit_price: float | None = None,
+    ) -> dict[str, Any]:
+        return self.place_limit_order(
+            symbol=symbol,
+            price=price,
+            vol=vol,
+            side=self.SIDE_OPEN_LONG,
+            open_type=open_type,
+            leverage=leverage,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+        )
+
+    def place_limit_short(
+            self,
+            *,
+            symbol: str,
+            price: float,
+            vol: float,
+            leverage: int,
+            open_type: int = OPEN_TYPE_ISOLATED,
+            stop_loss_price: float | None = None,
+            take_profit_price: float | None = None,
+    ) -> dict[str, Any]:
+        return self.place_limit_order(
+            symbol=symbol,
+            price=price,
+            vol=vol,
+            side=self.SIDE_OPEN_SHORT,
+            open_type=open_type,
+            leverage=leverage,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+        )
+
+    def place_market_long(
+            self,
+            *,
+            symbol: str,
+            vol: float,
+            leverage: int,
+            open_type: int = OPEN_TYPE_ISOLATED,
+    ) -> dict[str, Any]:
+        normalized_vol = self.normalize_volume(symbol, vol)
+
+        return self.place_order(
+            symbol=symbol,
+            price=0,
+            vol=normalized_vol,
+            side=self.SIDE_OPEN_LONG,
+            order_type=self.ORDER_TYPE_MARKET,
+            open_type=open_type,
+            leverage=leverage,
+        )
+
+    def place_market_short(
+            self,
+            *,
+            symbol: str,
+            vol: float,
+            leverage: int,
+            open_type: int = OPEN_TYPE_ISOLATED,
+    ) -> dict[str, Any]:
+        normalized_vol = self.normalize_volume(symbol, vol)
+
+        return self.place_order(
+            symbol=symbol,
+            price=0,
+            vol=normalized_vol,
+            side=self.SIDE_OPEN_SHORT,
+            order_type=self.ORDER_TYPE_MARKET,
+            open_type=open_type,
+            leverage=leverage,
+        )
