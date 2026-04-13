@@ -10,28 +10,33 @@ from telegram.client import create_client
 from telegram.auth import ensure_authorized
 from telegram.topic_listener import listen_selected_topics
 
+from parser.signal_parser import parse_signal_message
+
 
 
 async def main():
     settings = load_settings()
     tg_client = create_client(settings)
 
-    print(settings)
 
-    try:
-       await ensure_authorized(tg_client, settings.tg_phone)
+    test_text = """$AVAX hit 2 entry. Closed it, market very weak"""
 
-       await listen_selected_topics(
-           client=tg_client,
-           chat_id=settings.chat_id,
-           topic_ids=[
-               settings.topic_low_cap_id,
-               settings.topic_mid_high_cap_id,
-           ],
-       )
+    parse_signal_message(test_text)
 
-    finally:
-        await tg_client.disconnect()
+    # try:
+    #    await ensure_authorized(tg_client, settings.tg_phone)
+    #
+    #    await listen_selected_topics(
+    #        client=tg_client,
+    #        chat_id=settings.chat_id,
+    #        topic_ids=[
+    #            settings.topic_low_cap_id,
+    #            settings.topic_mid_high_cap_id,
+    #        ],
+    #    )
+    #
+    # finally:
+    #     await tg_client.disconnect()
 
 if __name__ == "__main__":
     asyncio.run(main())
