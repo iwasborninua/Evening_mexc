@@ -15,6 +15,7 @@ class Settings:
     mexc_api_secret: str
     mexc_base_url: str
     trading_margin: float
+    session_name: str = "tg_session"
 
 
 def load_settings() -> Settings:
@@ -25,6 +26,7 @@ def load_settings() -> Settings:
         tg_api_hash=os.getenv("TG_API_HASH"),
         tg_phone=os.getenv("TG_PHONE"),
         tg_chat_id=int(os.getenv("TG_CHAT_ID")),
+        session_name=os.getenv("TG_SESSION", "tg_session").strip(),
         topic_low_cap_id=int(os.getenv("TOPIC_LOW_CAP_ID")),
         topic_mid_high_cap_id=int(os.getenv("TOPIC_MID_HIGH_CAP_ID")),
         mexc_api_key=os.getenv("MEXC_API_KEY"),
