@@ -140,6 +140,7 @@ class MexcClient:
 
     def get_open_positions(self, symbol: str | None = None) -> dict[str, Any]:
         params = {"symbol": symbol} if symbol else {}
+
         return self._request(
             "GET",
             "/api/v1/private/position/open_positions",
@@ -180,7 +181,15 @@ class MexcClient:
                 "message": f"No open limit orders for {symbol}",
             }
 
-        return self.cancel_orders(limit_order_ids)
+        results = []
+        for order_id in limit_order_ids:
+            results.append(self.cancel_order(str(order_id)))
+
+        return {
+            "success": True,
+            "code": 0,
+            "data": results,
+        }
 
     # Размещение позиции
     def place_order(
@@ -596,3 +605,39 @@ class MexcClient:
             open_type=open_type,
             leverage=leverage,
         )
+
+    def cancel_all_open_orders_by_symbol(self, symbol: str) -> dict[str, Any]:
+        open_orders = self.get_open_orders(symbol)
+
+        if not open_orders.get("success"):
+            return open_orders
+
+        order_ids: list[int] = []
+
+        for item in open_orders.get("data", []):
+            order_id = item.get("orderId")
+            if order_id is not None:
+                order_ids.append(int(order_id))
+
+        if not order_ids:
+            return {
+                "success": True,
+                "code": 0,
+                "data": [],
+                "message": f"No open orders for {symbol}",
+            }
+
+        results = []
+        for order_id in order_ids:
+            result = self.cancel_order(str(order_id))
+            results.append({
+                "orderId": order_id,
+                "result": result,
+            })
+
+        return {
+            "success": True,
+            "code": 0,
+            "data": results,
+            "message": f"Canceled {len(order_ids)} open orders for {symbol}",
+        }

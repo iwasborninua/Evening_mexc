@@ -71,3 +71,13 @@ def parse_signal_message(text: str) -> dict | None:
                 )
 
                 pprint(order_2)
+
+    # отмена ордера
+    if all([asset, cancel]):
+        cancel = mexc.cancel_all_open_orders_by_symbol(asset.group(1))
+        print(cancel)
+
+    # Частичный профит
+    if all([asset, hit_tp]):
+        print('Частичный профит')
+        exit()
