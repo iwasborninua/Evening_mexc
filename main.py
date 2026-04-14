@@ -18,31 +18,21 @@ async def main():
     settings = load_settings()
     tg_client = create_client(settings)
 
+    try:
+        await ensure_authorized(tg_client, settings.tg_phone)
 
-    # test_text = """$AVAX hit TP2, close 10% vol 🎉🎉"""
-    test_text = """RISK Short $ZAMA (Leverage 5x)
+        await listen_selected_topics(
+            client=tg_client,
+            chat_id=settings.tg_chat_id,
+            topic_ids=[
+                settings.topic_low_cap_id,
+                settings.topic_mid_high_cap_id,
+            ],
+        )
 
-- Entry: 0.03095 - 0.032
-- TP: 0.02914 - 0.02708 - 0.02458 - 0.0206
-- SL: 0.0336
-"""
+    finally:
+        await tg_client.disconnect()
 
-    parse_signal_message(test_text)
-
-    # try:
-    #    await ensure_authorized(tg_client, settings.tg_phone)
-    #
-    #    await listen_selected_topics(
-    #        client=tg_client,
-    #        chat_id=settings.chat_id,
-    #        topic_ids=[
-    #            settings.topic_low_cap_id,
-    #            settings.topic_mid_high_cap_id,
-    #        ],
-    #    )
-    #
-    # finally:
-    #     await tg_client.disconnect()
 
 if __name__ == "__main__":
     asyncio.run(main())
