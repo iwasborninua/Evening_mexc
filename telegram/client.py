@@ -9,4 +9,5 @@ def create_client(settings: Settings) -> TelegramClient:
         auto_reconnect=True,
         retry_delay=5,
         request_retries=5,
+        timeout=30,
     )
