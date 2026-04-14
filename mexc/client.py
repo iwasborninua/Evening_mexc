@@ -187,6 +187,15 @@ class MexcClient:
             private=True,
         )
 
+    def get_position_stop_orders(self, symbol: str | None = None) -> dict[str, Any]:
+        params = {"symbol": symbol} if symbol else {}
+        return self._request(
+            "GET",
+            "/api/v1/private/stoporder/list/orders",
+            params=params,
+            private=True,
+        )
+
     def get_position(self, symbol: str) -> dict[str, Any] | None:
         response = self.get_open_positions(symbol)
 
@@ -248,7 +257,6 @@ class MexcClient:
         vol_unit = Decimal(str(contract["volUnit"]))
         min_vol = Decimal(str(contract["minVol"]))
 
-        # У MEXC поле размера контракта может отличаться по названию
         contract_size_raw = (
             contract.get("contractSize")
             or contract.get("contractValue")
@@ -332,6 +340,14 @@ class MexcClient:
         normalized_price = self.normalize_price(symbol, price)
         normalized_vol = self.normalize_volume(symbol, vol)
 
+        normalized_stop_loss_price = None
+        if stop_loss_price is not None:
+            normalized_stop_loss_price = self.normalize_price(symbol, stop_loss_price)
+
+        normalized_take_profit_price = None
+        if take_profit_price is not None:
+            normalized_take_profit_price = self.normalize_price(symbol, take_profit_price)
+
         return self.place_order(
             symbol=symbol,
             price=normalized_price,
@@ -340,8 +356,8 @@ class MexcClient:
             order_type=self.ORDER_TYPE_LIMIT,
             open_type=open_type,
             leverage=leverage,
-            stop_loss_price=stop_loss_price,
-            take_profit_price=take_profit_price,
+            stop_loss_price=normalized_stop_loss_price,
+            take_profit_price=normalized_take_profit_price,
         )
 
     def place_limit_long(
@@ -576,23 +592,65 @@ class MexcClient:
         position_id: int,
         symbol: str,
     ) -> dict[str, Any] | None:
-        # Заглушка под твои существующие методы, если они есть в проекте
+        response = self.get_position_stop_orders(symbol)
+
+        if not response.get("success"):
+            return None
+
+        for item in response.get("data", []):
+            if int(item.get("positionId", 0) or 0) != position_id:
+                continue
+
+            if item.get("symbol") != symbol:
+                continue
+
+            is_finished = int(item.get("isFinished", 0) or 0)
+            if is_finished != 0:
+                continue
+
+            return item
+
         return None
 
     def change_position_stop_order(
         self,
         *,
+        symbol: str,
         stop_plan_order_id: int,
         stop_loss_price: float | None,
         take_profit_price: float | None,
         loss_trend: int,
         profit_trend: int,
     ) -> dict[str, Any]:
-        raise NotImplementedError("change_position_stop_order is not implemented yet")
+        normalized_stop_loss_price = None
+        if stop_loss_price is not None and stop_loss_price > 0:
+            normalized_stop_loss_price = self.normalize_price(symbol, stop_loss_price)
+
+        normalized_take_profit_price = None
+        if take_profit_price is not None and take_profit_price > 0:
+            normalized_take_profit_price = self.normalize_price(symbol, take_profit_price)
+
+        payload = {
+            "stopPlanOrderId": stop_plan_order_id,
+            "stopLossPrice": normalized_stop_loss_price,
+            "takeProfitPrice": normalized_take_profit_price,
+            "lossTrend": loss_trend,
+            "profitTrend": profit_trend,
+            "stopLossReverse": 2,
+            "takeProfitReverse": 2,
+        }
+
+        return self._request(
+            "POST",
+            "/api/v1/private/stoporder/change_plan_price",
+            params=payload,
+            private=True,
+        )
 
     def place_position_stop_order(
         self,
         *,
+        symbol: str,
         position_id: int,
         vol: float,
         stop_loss_price: float | None,
@@ -602,7 +660,37 @@ class MexcClient:
         vol_type: int,
         stop_loss_type: int,
     ) -> dict[str, Any]:
-        raise NotImplementedError("place_position_stop_order is not implemented yet")
+        normalized_stop_loss_price = None
+        if stop_loss_price is not None and stop_loss_price > 0:
+            normalized_stop_loss_price = self.normalize_price(symbol, stop_loss_price)
+
+        normalized_take_profit_price = None
+        if take_profit_price is not None and take_profit_price > 0:
+            normalized_take_profit_price = self.normalize_price(symbol, take_profit_price)
+
+        payload = {
+            "positionId": position_id,
+            "vol": vol,
+            "stopLossPrice": normalized_stop_loss_price,
+            "takeProfitPrice": normalized_take_profit_price,
+            "lossTrend": loss_trend,
+            "profitTrend": profit_trend,
+            "volType": vol_type,
+            "stopLossType": stop_loss_type,
+            "priceProtect": 0,
+            "stopLossReverse": 2,
+            "takeProfitReverse": 2,
+        }
+
+        if normalized_take_profit_price is not None:
+            payload["takeProfitType"] = 0
+
+        return self._request(
+            "POST",
+            "/api/v1/private/stoporder/place",
+            params=payload,
+            private=True,
+        )
 
     def move_stop_loss_to_break_even_with_symbol_fee(
         self,
@@ -612,80 +700,89 @@ class MexcClient:
         exit_fee_type: str = "taker",
         use_hold_avg_price: bool = False,
     ) -> dict[str, Any]:
-        position = self.get_position(symbol)
-        if position is None:
-            return {
-                "success": False,
-                "error": f"Open position not found for {symbol}",
-            }
+        try:
+            position = self.get_position(symbol)
+            if position is None:
+                return {
+                    "success": False,
+                    "error": f"Open position not found for {symbol}",
+                }
 
-        entry_price_raw = (
-            position.get("holdAvgPrice")
-            if use_hold_avg_price
-            else position.get("openAvgPrice")
-        )
-
-        if entry_price_raw is None:
-            return {
-                "success": False,
-                "error": f"Entry price not found for {symbol}",
-            }
-
-        fee_rates = self.get_symbol_fee_rates(symbol)
-
-        if entry_fee_type not in fee_rates:
-            return {
-                "success": False,
-                "error": f"Unknown entry_fee_type: {entry_fee_type}",
-            }
-
-        if exit_fee_type not in fee_rates:
-            return {
-                "success": False,
-                "error": f"Unknown exit_fee_type: {exit_fee_type}",
-            }
-
-        open_fee_rate = fee_rates[entry_fee_type]
-        close_fee_rate = fee_rates[exit_fee_type]
-
-        position_id = int(position["positionId"])
-        hold_vol = float(position["holdVol"])
-        position_type = int(position["positionType"])
-
-        is_long = position_type == 1
-        loss_trend = 1 if is_long else 2
-
-        be_price = self.calculate_break_even_price(
-            symbol=symbol,
-            entry_price=float(entry_price_raw),
-            is_long=is_long,
-            open_fee_rate=open_fee_rate,
-            close_fee_rate=close_fee_rate,
-        )
-
-        current_stop = self.get_position_stop_order(position_id, symbol)
-
-        if current_stop:
-            stop_plan_order_id = int(current_stop["id"])
-
-            return self.change_position_stop_order(
-                stop_plan_order_id=stop_plan_order_id,
-                stop_loss_price=be_price,
-                take_profit_price=current_stop.get("takeProfitPrice"),
-                loss_trend=loss_trend,
-                profit_trend=int(current_stop.get("profitTrend", 1) or 1),
+            entry_price_raw = (
+                position.get("holdAvgPrice")
+                if use_hold_avg_price
+                else position.get("openAvgPrice")
             )
 
-        return self.place_position_stop_order(
-            position_id=position_id,
-            vol=hold_vol,
-            stop_loss_price=be_price,
-            take_profit_price=None,
-            loss_trend=loss_trend,
-            profit_trend=1,
-            vol_type=2,
-            stop_loss_type=0,
-        )
+            if entry_price_raw is None:
+                return {
+                    "success": False,
+                    "error": f"Entry price not found for {symbol}",
+                }
+
+            fee_rates = self.get_symbol_fee_rates(symbol)
+
+            if entry_fee_type not in fee_rates:
+                return {
+                    "success": False,
+                    "error": f"Unknown entry_fee_type: {entry_fee_type}",
+                }
+
+            if exit_fee_type not in fee_rates:
+                return {
+                    "success": False,
+                    "error": f"Unknown exit_fee_type: {exit_fee_type}",
+                }
+
+            open_fee_rate = fee_rates[entry_fee_type]
+            close_fee_rate = fee_rates[exit_fee_type]
+
+            position_id = int(position["positionId"])
+            hold_vol = float(position["holdVol"])
+            position_type = int(position["positionType"])
+
+            is_long = position_type == 1
+            loss_trend = 1 if is_long else 2
+
+            be_price = self.calculate_break_even_price(
+                symbol=symbol,
+                entry_price=float(entry_price_raw),
+                is_long=is_long,
+                open_fee_rate=open_fee_rate,
+                close_fee_rate=close_fee_rate,
+            )
+
+            current_stop = self.get_position_stop_order(position_id, symbol)
+
+            if current_stop:
+                stop_plan_order_id = int(current_stop["id"])
+
+                return self.change_position_stop_order(
+                    symbol=symbol,
+                    stop_plan_order_id=stop_plan_order_id,
+                    stop_loss_price=be_price,
+                    take_profit_price=current_stop.get("takeProfitPrice"),
+                    loss_trend=loss_trend,
+                    profit_trend=int(current_stop.get("profitTrend", 1) or 1),
+                )
+
+            return self.place_position_stop_order(
+                symbol=symbol,
+                position_id=position_id,
+                vol=hold_vol,
+                stop_loss_price=be_price,
+                take_profit_price=None,
+                loss_trend=loss_trend,
+                profit_trend=1,
+                vol_type=2,
+                stop_loss_type=0,
+            )
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "step": "move_stop_loss_to_break_even_with_symbol_fee",
+            }
 
     def move_stop_loss_to_break_even(self, symbol: str) -> dict[str, Any]:
         return self.move_stop_loss_to_break_even_with_symbol_fee(
@@ -760,34 +857,32 @@ class MexcClient:
         )
 
     def handle_tp_partial_close(self, symbol: str, percent: int) -> dict[str, Any]:
-        be_result = self.move_stop_loss_to_break_even(symbol)
-        if be_result.get("success") is False:
-            return {
-                "success": False,
-                "step": "move_stop_loss_to_break_even",
-                "details": be_result,
-            }
-
-        close_result = self.close_position_partially(symbol, percent)
-        if close_result.get("success") is False:
-            return {
-                "success": False,
-                "step": "close_position_partially",
-                "details": close_result,
-            }
-
-        cancel_result = self.cancel_limit_orders_by_symbol(symbol)
-        if cancel_result.get("success") is False:
-            return {
-                "success": False,
-                "step": "cancel_limit_orders_by_symbol",
-                "details": cancel_result,
-            }
-
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "step": "handle_tp_partial_close",
-            "close_result": close_result,
-            "be_result": be_result,
-            "cancel_result": cancel_result,
         }
+
+        be_result = self.move_stop_loss_to_break_even(symbol)
+        result["be_result"] = be_result
+
+        close_result = self.close_position_partially(symbol, percent)
+        result["close_result"] = close_result
+
+        if close_result.get("success") is False:
+            result["success"] = False
+            result["step"] = "close_position_partially"
+            return result
+
+        cancel_result = self.cancel_limit_orders_by_symbol(symbol)
+        result["cancel_result"] = cancel_result
+
+        if cancel_result.get("success") is False:
+            result["success"] = False
+            result["step"] = "cancel_limit_orders_by_symbol"
+
+        if be_result.get("success") is False:
+            result["success"] = False
+            if result["step"] == "handle_tp_partial_close":
+                result["step"] = "move_stop_loss_to_break_even"
+
+        return result
