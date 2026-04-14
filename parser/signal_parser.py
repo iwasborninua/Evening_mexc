@@ -15,7 +15,7 @@ def parse_signal_message(text: str) -> dict | None:
     entry_match = re.search(r"Entry:\s*([\d.]+)\s*-\s*([\d.]+)", text, re.IGNORECASE)
     tp_match = re.search(r"TP:\s*([^\n]+)", text, re.IGNORECASE)
     sl_match = re.search(r"SL:\s*([\d.]+)", text, re.IGNORECASE)
-    cancel = bool(re.search(r"\b(?:cancel|closed|close)\b", text, re.IGNORECASE))
+    cancel = bool(re.search(r"\b(?:cancel|closed)\b", text, re.IGNORECASE))
 
 
     hit_tp = re.search(
@@ -79,5 +79,8 @@ def parse_signal_message(text: str) -> dict | None:
 
     # Частичный профит
     if all([asset, hit_tp]):
-        print('Частичный профит')
-        exit()
+        partial = mexc.close_position_partially(
+            symbol=asset.group(1) + '_USDT', percent=int(hit_tp.group(1))
+        )
+
+        pprint(partial)

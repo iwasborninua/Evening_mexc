@@ -19,7 +19,7 @@ async def main():
     tg_client = create_client(settings)
 
 
-    test_text = """$WLFI hit TP2, close 10% vol 🎉🎉"""
+    test_text = """$AVAX hit TP2, close 10% vol 🎉🎉"""
     #     test_text = """Limit Scalp Short $BTC (Leverage 15x) 📉
     #
     # Entry: 74700.0 - 76043.3
