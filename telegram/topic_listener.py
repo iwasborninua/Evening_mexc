@@ -30,7 +30,7 @@ async def listen_selected_topics(
 
         if asset is not None or reply_to_msg_id in topic_ids:
             result = parse_signal_message(text)
-            pprint(result)
+            print(result)
 
     print("Listening selected topics...")
     await client.run_until_disconnected()
