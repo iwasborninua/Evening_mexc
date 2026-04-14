@@ -32,7 +32,7 @@ def parse_signal_message(text: str) -> dict | None:
             order_1 = mexc.place_limit_long(
                 symbol=symbol,
                 price=float(entry_match.group(1)),
-                vol=float(vol),
+                vol=int(vol),
                 leverage=int(leverage.group(1)),
                 stop_loss_price=float(sl_match.group(1)),
                 take_profit_price=float(tp_values[-1]),
@@ -42,7 +42,7 @@ def parse_signal_message(text: str) -> dict | None:
                 order_2 = mexc.place_limit_long(
                     symbol=symbol,
                     price=float(entry_match.group(2)),
-                    vol=float(vol),
+                    vol=int(vol),
                     leverage=int(leverage.group(1)),
                     stop_loss_price=float(sl_match.group(1)),
                     take_profit_price=float(tp_values[-1]),
@@ -52,7 +52,7 @@ def parse_signal_message(text: str) -> dict | None:
             order_1 = mexc.place_limit_short(
                 symbol=symbol,
                 price=float(entry_match.group(1)),
-                vol=float(vol),
+                vol=int(vol),
                 leverage=int(leverage.group(1)),
                 stop_loss_price=float(sl_match.group(1)),
                 take_profit_price=float(tp_values[-1]),
@@ -64,7 +64,7 @@ def parse_signal_message(text: str) -> dict | None:
                 order_2 = mexc.place_limit_short(
                     symbol=symbol,
                     price=float(entry_match.group(2)),
-                    vol=float(vol),
+                    vol=int(vol),
                     leverage=int(leverage.group(1)),
                     stop_loss_price=float(sl_match.group(1)),
                     take_profit_price=float(tp_values[-1]),
