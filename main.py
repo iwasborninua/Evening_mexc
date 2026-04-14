@@ -20,11 +20,11 @@ async def main():
 
 
     # test_text = """$AVAX hit TP2, close 10% vol 🎉🎉"""
-    test_text = """Limit Scalp Short $ALGO (Leverage 8x) 📉 
+    test_text = """RISK Short $ZAMA (Leverage 5x)
 
-Entry: 0.1100 - 0.1141
-TP: 0.1055 - 0.1007 - 0.0959 - 0.0887 - 0.0806
-SL: 0.1175
+- Entry: 0.03095 - 0.032
+- TP: 0.02914 - 0.02708 - 0.02458 - 0.0206
+- SL: 0.0336
 """
 
     parse_signal_message(test_text)

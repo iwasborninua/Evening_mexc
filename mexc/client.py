@@ -2,12 +2,13 @@ import hashlib
 import hmac
 import json
 import time
-from typing import Any
 from decimal import Decimal, ROUND_DOWN
+from typing import Any
 
 import requests
 
 from config.config import Settings
+
 
 class MexcClient:
     SIDE_OPEN_LONG = 1
@@ -21,7 +22,6 @@ class MexcClient:
     OPEN_TYPE_ISOLATED = 1
     OPEN_TYPE_CROSS = 2
 
-
     def __init__(self, settings: Settings) -> None:
         self._contracts_cache: dict[str, dict[str, Any]] = {}
 
@@ -34,17 +34,12 @@ class MexcClient:
             "Content-Type": "application/json",
         })
 
-    def load_contracts_cache(self) -> None:
-        response = self.get_contracts()
+    # -------------------------
+    # Helpers
+    # -------------------------
 
-        if not response.get("success"):
-            raise ValueError(f"Failed to load contracts: {response}")
-
-        self._contracts_cache = {
-            item["symbol"]: item
-            for item in response.get("data", [])
-            if item.get("symbol")
-        }
+    def _now_ms(self) -> str:
+        return str(int(time.time() * 1000))
 
     def _private_headers(self, timestamp: str, signature: str) -> dict[str, str]:
         return {
@@ -55,11 +50,6 @@ class MexcClient:
             "Content-Type": "application/json",
         }
 
-    # Для API нужно текущее время в ms, юзаем в подписи запроса
-    def _now_ms(self) -> str:
-        return str(int(time.time() * 1000))
-
-    # Построитель запроса
     def _build_query_string(self, params: dict[str, Any] | None) -> str:
         if not params:
             return ""
@@ -76,7 +66,6 @@ class MexcClient:
 
         return "&".join(pairs)
 
-    # Этот метод создает криптографическую подпись запроса.
     def _build_signature(self, timestamp: str, parameter_string: str) -> str:
         payload = f"{self.api_key}{timestamp}{parameter_string}"
         return hmac.new(
@@ -85,13 +74,12 @@ class MexcClient:
             hashlib.sha256,
         ).hexdigest()
 
-    # универсальный метод для отправки HTTP - запросов к API
     def _request(
-            self,
-            method: str,
-            path: str,
-            params: dict[str, Any] | list[Any] | None = None,
-            private: bool = False,
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | list[Any] | None = None,
+        private: bool = False,
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         method = method.upper()
@@ -103,13 +91,26 @@ class MexcClient:
             timestamp = self._now_ms()
 
             if method in ("GET", "DELETE"):
-                parameter_string = self._build_query_string(params if isinstance(params, dict) else {})
+                parameter_string = self._build_query_string(
+                    params if isinstance(params, dict) else {}
+                )
             else:
                 if isinstance(params, dict):
-                    filtered_params = {k: v for k, v in params.items() if v is not None}
-                    body = json.dumps(filtered_params, separators=(",", ":"), ensure_ascii=False)
+                    filtered_params = {
+                        k: v for k, v in params.items()
+                        if v is not None
+                    }
+                    body = json.dumps(
+                        filtered_params,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
                 else:
-                    body = json.dumps(params, separators=(",", ":"), ensure_ascii=False)
+                    body = json.dumps(
+                        params,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
 
                 parameter_string = body
 
@@ -128,19 +129,48 @@ class MexcClient:
         response.raise_for_status()
         return response.json()
 
+    @staticmethod
+    def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
+        steps = (value / step).to_integral_value(rounding=ROUND_DOWN)
+        return steps * step
+
     # -------------------------
-    # Private methods
+    # Public / market data
     # -------------------------
 
-    def ping(self) -> dict:
+    def ping(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/contract/ping")
+
+    def get_contracts(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/contract/detail")
+
+    def load_contracts_cache(self) -> None:
+        response = self.get_contracts()
+
+        if not response.get("success"):
+            raise ValueError(f"Failed to load contracts: {response}")
+
+        self._contracts_cache = {
+            item["symbol"]: item
+            for item in response.get("data", [])
+            if item.get("symbol")
+        }
+
+    def get_contract_by_symbol(self, symbol: str) -> dict[str, Any] | None:
+        if not self._contracts_cache:
+            self.load_contracts_cache()
+
+        return self._contracts_cache.get(symbol)
+
+    # -------------------------
+    # Account / positions / orders
+    # -------------------------
 
     def get_account_assets(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/private/account/assets", private=True)
 
     def get_open_positions(self, symbol: str | None = None) -> dict[str, Any]:
         params = {"symbol": symbol} if symbol else {}
-
         return self._request(
             "GET",
             "/api/v1/private/position/open_positions",
@@ -148,7 +178,6 @@ class MexcClient:
             private=True,
         )
 
-    # Открытые лимитные ордера
     def get_open_orders(self, symbol: str | None = None) -> dict[str, Any]:
         params = {"symbol": symbol} if symbol else {}
         return self._request(
@@ -158,119 +187,22 @@ class MexcClient:
             private=True,
         )
 
-    # Отменяем лимитные ордера
-    def cancel_limit_orders_by_symbol(self, symbol: str) -> dict[str, Any]:
-        open_orders = self.get_open_orders(symbol)
+    def get_position(self, symbol: str) -> dict[str, Any] | None:
+        response = self.get_open_positions(symbol)
 
-        if not open_orders.get("success"):
-            return open_orders
+        if not response.get("success"):
+            return None
 
-        limit_order_ids: list[int] = []
+        for item in response.get("data", []):
+            hold_vol = float(item.get("holdVol", 0) or 0)
+            if item.get("symbol") == symbol and hold_vol > 0:
+                return item
 
-        for item in open_orders.get("data", []):
-            order_type = int(item.get("orderType", 0) or 0)
+        return None
 
-            if order_type in (1, 2):
-                limit_order_ids.append(int(item["orderId"]))
-
-        if not limit_order_ids:
-            return {
-                "success": True,
-                "code": 0,
-                "data": [],
-                "message": f"No open limit orders for {symbol}",
-            }
-
-        results = []
-        for order_id in limit_order_ids:
-            results.append(self.cancel_order(str(order_id)))
-
-        return {
-            "success": True,
-            "code": 0,
-            "data": results,
-        }
-
-    # Размещение позиции
-    def place_order(
-            self,
-            *,
-            symbol: str,
-            price: float,
-            vol: float,
-            side: int,
-            order_type: int,
-            open_type: int,
-            leverage: int | None = None,
-            stop_loss_price: float | None = None,
-            take_profit_price: float | None = None,
-            external_oid: str | None = None,
-    ) -> dict[str, Any]:
-        payload = {
-            "symbol": symbol,
-            "price": price,
-            "vol": vol,
-            "side": side,
-            "type": order_type,
-            "openType": open_type,
-            "leverage": leverage,
-            "stopLossPrice": stop_loss_price,
-            "takeProfitPrice": take_profit_price,
-            "externalOid": external_oid,
-        }
-
-        return self._request(
-            "POST",
-            "/api/v1/private/order/create",
-            params=payload,
-            private=True,
-        )
-    # Обертка для размещения ордера
-    def place_limit_order(
-            self,
-            *,
-            symbol: str,
-            price: float,
-            vol: float,
-            side: int,
-            open_type: int,
-            leverage: int,
-            stop_loss_price: float | None = None,
-            take_profit_price: float | None = None,
-    ) -> dict[str, Any]:
-        normalized_price = self.normalize_price(symbol, price)
-        normalized_vol = self.normalize_volume(symbol, vol)
-
-        return self.place_order(
-            symbol=symbol,
-            price=normalized_price,
-            vol=normalized_vol,
-            side=side,
-            order_type=1,
-            open_type=open_type,
-            leverage=leverage,
-            stop_loss_price=stop_loss_price,
-            take_profit_price=take_profit_price,
-        )
-
-    # отменяет любой ордер
-    def cancel_order(self, order_id: str) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            "/api/v1/private/order/cancel",
-            params=[int(order_id)],
-            private=True,
-        )
-
-    # Список текущих позиций
-    def get_contracts(self) -> dict[str, Any]:
-        return self._request("GET", "/api/v1/contract/detail")
-
-    def get_contract_by_symbol(self, symbol: str) -> dict[str, Any] | None:
-        if not self._contracts_cache:
-            self.load_contracts_cache()
-
-        return self._contracts_cache.get(symbol)
+    # -------------------------
+    # Normalization
+    # -------------------------
 
     def normalize_price(self, symbol: str, price: float) -> float:
         contract = self.get_contract_by_symbol(symbol)
@@ -294,11 +226,295 @@ class MexcClient:
         if value < min_vol:
             raise ValueError(f"Volume is less than minVol: {min_vol}")
 
-        steps = (value / vol_unit).to_integral_value(rounding=ROUND_DOWN)
-        normalized = steps * vol_unit
+        normalized = self._floor_to_step(value, vol_unit)
         return float(normalized)
 
-    # получаем детали комиссий для символа
+    # -------------------------
+    # Volume calculation by margin
+    # -------------------------
+
+    def calculate_volume_by_margin(
+        self,
+        *,
+        symbol: str,
+        margin_usdt: float,
+        leverage: int,
+        price: float,
+    ) -> float:
+        contract = self.get_contract_by_symbol(symbol)
+        if not contract:
+            raise ValueError(f"Contract not found: {symbol}")
+
+        vol_unit = Decimal(str(contract["volUnit"]))
+        min_vol = Decimal(str(contract["minVol"]))
+
+        # У MEXC поле размера контракта может отличаться по названию
+        contract_size_raw = (
+            contract.get("contractSize")
+            or contract.get("contractValue")
+            or contract.get("multiplier")
+            or 1
+        )
+        contract_size = Decimal(str(contract_size_raw))
+
+        margin = Decimal(str(margin_usdt))
+        lev = Decimal(str(leverage))
+        entry_price = Decimal(str(price))
+
+        if margin <= 0:
+            raise ValueError("margin_usdt must be > 0")
+
+        if lev <= 0:
+            raise ValueError("leverage must be > 0")
+
+        if entry_price <= 0:
+            raise ValueError("price must be > 0")
+
+        target_notional = margin * lev
+        raw_vol = target_notional / (entry_price * contract_size)
+        normalized_vol = self._floor_to_step(raw_vol, vol_unit)
+
+        if normalized_vol < min_vol:
+            normalized_vol = min_vol
+
+        return float(normalized_vol)
+
+    # -------------------------
+    # Order placement
+    # -------------------------
+
+    def place_order(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        vol: float,
+        side: int,
+        order_type: int,
+        open_type: int,
+        leverage: int | None = None,
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
+        external_oid: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "symbol": symbol,
+            "price": price,
+            "vol": vol,
+            "side": side,
+            "type": order_type,
+            "openType": open_type,
+            "leverage": leverage,
+            "stopLossPrice": stop_loss_price,
+            "takeProfitPrice": take_profit_price,
+            "externalOid": external_oid,
+        }
+
+        return self._request(
+            "POST",
+            "/api/v1/private/order/create",
+            params=payload,
+            private=True,
+        )
+
+    def place_limit_order(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        vol: float,
+        side: int,
+        open_type: int,
+        leverage: int,
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
+    ) -> dict[str, Any]:
+        normalized_price = self.normalize_price(symbol, price)
+        normalized_vol = self.normalize_volume(symbol, vol)
+
+        return self.place_order(
+            symbol=symbol,
+            price=normalized_price,
+            vol=normalized_vol,
+            side=side,
+            order_type=self.ORDER_TYPE_LIMIT,
+            open_type=open_type,
+            leverage=leverage,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+        )
+
+    def place_limit_long(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        vol: float,
+        leverage: int,
+        open_type: int = OPEN_TYPE_ISOLATED,
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
+    ) -> dict[str, Any]:
+        return self.place_limit_order(
+            symbol=symbol,
+            price=price,
+            vol=vol,
+            side=self.SIDE_OPEN_LONG,
+            open_type=open_type,
+            leverage=leverage,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+        )
+
+    def place_limit_short(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        vol: float,
+        leverage: int,
+        open_type: int = OPEN_TYPE_ISOLATED,
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
+    ) -> dict[str, Any]:
+        return self.place_limit_order(
+            symbol=symbol,
+            price=price,
+            vol=vol,
+            side=self.SIDE_OPEN_SHORT,
+            open_type=open_type,
+            leverage=leverage,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+        )
+
+    def place_market_long(
+        self,
+        *,
+        symbol: str,
+        vol: float,
+        leverage: int,
+        open_type: int = OPEN_TYPE_ISOLATED,
+    ) -> dict[str, Any]:
+        normalized_vol = self.normalize_volume(symbol, vol)
+
+        return self.place_order(
+            symbol=symbol,
+            price=0,
+            vol=normalized_vol,
+            side=self.SIDE_OPEN_LONG,
+            order_type=self.ORDER_TYPE_MARKET,
+            open_type=open_type,
+            leverage=leverage,
+        )
+
+    def place_market_short(
+        self,
+        *,
+        symbol: str,
+        vol: float,
+        leverage: int,
+        open_type: int = OPEN_TYPE_ISOLATED,
+    ) -> dict[str, Any]:
+        normalized_vol = self.normalize_volume(symbol, vol)
+
+        return self.place_order(
+            symbol=symbol,
+            price=0,
+            vol=normalized_vol,
+            side=self.SIDE_OPEN_SHORT,
+            order_type=self.ORDER_TYPE_MARKET,
+            open_type=open_type,
+            leverage=leverage,
+        )
+
+    # -------------------------
+    # Cancel orders
+    # -------------------------
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/v1/private/order/cancel",
+            params=[int(order_id)],
+            private=True,
+        )
+
+    def cancel_limit_orders_by_symbol(self, symbol: str) -> dict[str, Any]:
+        open_orders = self.get_open_orders(symbol)
+
+        if not open_orders.get("success"):
+            return open_orders
+
+        limit_order_ids: list[int] = []
+
+        for item in open_orders.get("data", []):
+            order_type = int(item.get("orderType", 0) or 0)
+            if order_type in (1, 2):
+                limit_order_ids.append(int(item["orderId"]))
+
+        if not limit_order_ids:
+            return {
+                "success": True,
+                "code": 0,
+                "data": [],
+                "message": f"No open limit orders for {symbol}",
+            }
+
+        results = []
+        for order_id in limit_order_ids:
+            results.append({
+                "orderId": order_id,
+                "result": self.cancel_order(str(order_id)),
+            })
+
+        return {
+            "success": True,
+            "code": 0,
+            "data": results,
+            "message": f"Canceled {len(limit_order_ids)} limit orders for {symbol}",
+        }
+
+    def cancel_all_open_orders_by_symbol(self, symbol: str) -> dict[str, Any]:
+        open_orders = self.get_open_orders(symbol)
+
+        if not open_orders.get("success"):
+            return open_orders
+
+        order_ids: list[int] = []
+
+        for item in open_orders.get("data", []):
+            order_id = item.get("orderId")
+            if order_id is not None:
+                order_ids.append(int(order_id))
+
+        if not order_ids:
+            return {
+                "success": True,
+                "code": 0,
+                "data": [],
+                "message": f"No open orders for {symbol}",
+            }
+
+        results = []
+        for order_id in order_ids:
+            result = self.cancel_order(str(order_id))
+            results.append({
+                "orderId": order_id,
+                "result": result,
+            })
+
+        return {
+            "success": True,
+            "code": 0,
+            "data": results,
+            "message": f"Canceled {len(order_ids)} open orders for {symbol}",
+        }
+
+    # -------------------------
+    # Fees / break-even
+    # -------------------------
+
     def get_fee_details(self, symbol: str | None = None) -> dict[str, Any]:
         params = {"symbol": symbol} if symbol else {}
         return self._request(
@@ -308,7 +524,6 @@ class MexcClient:
             private=True,
         )
 
-    # Получаем комиссии выбранного символа
     def get_symbol_fee_rates(self, symbol: str) -> dict[str, float]:
         response = self.get_fee_details(symbol)
 
@@ -328,14 +543,74 @@ class MexcClient:
             "taker": float(real_taker_fee),
         }
 
-    # Перемешаем позицию в безубыток, учитываем комиссию
+    def calculate_break_even_price(
+        self,
+        *,
+        symbol: str,
+        entry_price: float,
+        is_long: bool,
+        open_fee_rate: float,
+        close_fee_rate: float,
+    ) -> float:
+        contract = self.get_contract_by_symbol(symbol)
+        if not contract:
+            raise ValueError(f"Contract not found: {symbol}")
+
+        entry = Decimal(str(entry_price))
+        open_fee = Decimal(str(open_fee_rate))
+        close_fee = Decimal(str(close_fee_rate))
+
+        total_fee = open_fee + close_fee
+
+        if is_long:
+            be_price = entry * (Decimal("1") + total_fee)
+        else:
+            be_price = entry * (Decimal("1") - total_fee)
+
+        price_unit = Decimal(str(contract["priceUnit"]))
+        normalized = be_price.quantize(price_unit, rounding=ROUND_DOWN)
+        return float(normalized)
+
+    def get_position_stop_order(
+        self,
+        position_id: int,
+        symbol: str,
+    ) -> dict[str, Any] | None:
+        # Заглушка под твои существующие методы, если они есть в проекте
+        return None
+
+    def change_position_stop_order(
+        self,
+        *,
+        stop_plan_order_id: int,
+        stop_loss_price: float | None,
+        take_profit_price: float | None,
+        loss_trend: int,
+        profit_trend: int,
+    ) -> dict[str, Any]:
+        raise NotImplementedError("change_position_stop_order is not implemented yet")
+
+    def place_position_stop_order(
+        self,
+        *,
+        position_id: int,
+        vol: float,
+        stop_loss_price: float | None,
+        take_profit_price: float | None,
+        loss_trend: int,
+        profit_trend: int,
+        vol_type: int,
+        stop_loss_type: int,
+    ) -> dict[str, Any]:
+        raise NotImplementedError("place_position_stop_order is not implemented yet")
+
     def move_stop_loss_to_break_even_with_symbol_fee(
-            self,
-            symbol: str,
-            *,
-            entry_fee_type: str = "maker",
-            exit_fee_type: str = "taker",
-            use_hold_avg_price: bool = False,
+        self,
+        symbol: str,
+        *,
+        entry_fee_type: str = "maker",
+        exit_fee_type: str = "taker",
+        use_hold_avg_price: bool = False,
     ) -> dict[str, Any]:
         position = self.get_position(symbol)
         if position is None:
@@ -412,7 +687,6 @@ class MexcClient:
             stop_loss_type=0,
         )
 
-    # Обертка под метод перевода SL в безубыток
     def move_stop_loss_to_break_even(self, symbol: str) -> dict[str, Any]:
         return self.move_stop_loss_to_break_even_with_symbol_fee(
             symbol,
@@ -420,7 +694,10 @@ class MexcClient:
             exit_fee_type="taker",
         )
 
-    # Частичное закрытие позиции
+    # -------------------------
+    # Partial close
+    # -------------------------
+
     def close_position_partially(self, symbol: str, percent: int) -> dict[str, Any]:
         if percent <= 0 or percent > 100:
             return {
@@ -453,8 +730,7 @@ class MexcClient:
         min_vol = Decimal(str(contract["minVol"]))
 
         raw_close_vol = hold_vol * Decimal(str(percent)) / Decimal("100")
-        steps = (raw_close_vol / vol_unit).to_integral_value(rounding=ROUND_DOWN)
-        close_vol = steps * vol_unit
+        close_vol = self._floor_to_step(raw_close_vol, vol_unit)
 
         if close_vol < min_vol:
             close_vol = min_vol
@@ -464,11 +740,10 @@ class MexcClient:
 
         position_type = int(position.get("positionType", 0) or 0)
 
-        # 1 = long, 2 = short
         if position_type == 1:
-            close_side = 4
+            close_side = self.SIDE_CLOSE_LONG
         elif position_type == 2:
-            close_side = 2
+            close_side = self.SIDE_CLOSE_SHORT
         else:
             return {
                 "success": False,
@@ -480,25 +755,19 @@ class MexcClient:
             price=0,
             vol=float(close_vol),
             side=close_side,
-            order_type=5,
-            open_type=2,
+            order_type=self.ORDER_TYPE_MARKET,
+            open_type=self.OPEN_TYPE_CROSS,
         )
 
-
-    def get_position(self, symbol: str) -> dict[str, Any] | None:
-        response = self.get_open_positions(symbol)
-
-        if not response.get("success"):
-            return None
-
-        for item in response.get("data", []):
-            hold_vol = float(item.get("holdVol", 0) or 0)
-            if item.get("symbol") == symbol and hold_vol > 0:
-                return item
-
-        return None
-
     def handle_tp_partial_close(self, symbol: str, percent: int) -> dict[str, Any]:
+        be_result = self.move_stop_loss_to_break_even(symbol)
+        if be_result.get("success") is False:
+            return {
+                "success": False,
+                "step": "move_stop_loss_to_break_even",
+                "details": be_result,
+            }
+
         close_result = self.close_position_partially(symbol, percent)
         if close_result.get("success") is False:
             return {
@@ -519,125 +788,6 @@ class MexcClient:
             "success": True,
             "step": "handle_tp_partial_close",
             "close_result": close_result,
+            "be_result": be_result,
             "cancel_result": cancel_result,
-        }
-
-    def place_limit_long(
-            self,
-            *,
-            symbol: str,
-            price: float,
-            vol: float,
-            leverage: int,
-            open_type: int = OPEN_TYPE_ISOLATED,
-            stop_loss_price: float | None = None,
-            take_profit_price: float | None = None,
-    ) -> dict[str, Any]:
-        return self.place_limit_order(
-            symbol=symbol,
-            price=price,
-            vol=vol,
-            side=self.SIDE_OPEN_LONG,
-            open_type=open_type,
-            leverage=leverage,
-            stop_loss_price=stop_loss_price,
-            take_profit_price=take_profit_price,
-        )
-
-    def place_limit_short(
-            self,
-            *,
-            symbol: str,
-            price: float,
-            vol: float,
-            leverage: int,
-            open_type: int = OPEN_TYPE_ISOLATED,
-            stop_loss_price: float | None = None,
-            take_profit_price: float | None = None,
-    ) -> dict[str, Any]:
-        return self.place_limit_order(
-            symbol=symbol,
-            price=price,
-            vol=vol,
-            side=self.SIDE_OPEN_SHORT,
-            open_type=open_type,
-            leverage=leverage,
-            stop_loss_price=stop_loss_price,
-            take_profit_price=take_profit_price,
-        )
-
-    def place_market_long(
-            self,
-            *,
-            symbol: str,
-            vol: float,
-            leverage: int,
-            open_type: int = OPEN_TYPE_ISOLATED,
-    ) -> dict[str, Any]:
-        normalized_vol = self.normalize_volume(symbol, vol)
-
-        return self.place_order(
-            symbol=symbol,
-            price=0,
-            vol=normalized_vol,
-            side=self.SIDE_OPEN_LONG,
-            order_type=self.ORDER_TYPE_MARKET,
-            open_type=open_type,
-            leverage=leverage,
-        )
-
-    def place_market_short(
-            self,
-            *,
-            symbol: str,
-            vol: float,
-            leverage: int,
-            open_type: int = OPEN_TYPE_ISOLATED,
-    ) -> dict[str, Any]:
-        normalized_vol = self.normalize_volume(symbol, vol)
-
-        return self.place_order(
-            symbol=symbol,
-            price=0,
-            vol=normalized_vol,
-            side=self.SIDE_OPEN_SHORT,
-            order_type=self.ORDER_TYPE_MARKET,
-            open_type=open_type,
-            leverage=leverage,
-        )
-
-    def cancel_all_open_orders_by_symbol(self, symbol: str) -> dict[str, Any]:
-        open_orders = self.get_open_orders(symbol)
-
-        if not open_orders.get("success"):
-            return open_orders
-
-        order_ids: list[int] = []
-
-        for item in open_orders.get("data", []):
-            order_id = item.get("orderId")
-            if order_id is not None:
-                order_ids.append(int(order_id))
-
-        if not order_ids:
-            return {
-                "success": True,
-                "code": 0,
-                "data": [],
-                "message": f"No open orders for {symbol}",
-            }
-
-        results = []
-        for order_id in order_ids:
-            result = self.cancel_order(str(order_id))
-            results.append({
-                "orderId": order_id,
-                "result": result,
-            })
-
-        return {
-            "success": True,
-            "code": 0,
-            "data": results,
-            "message": f"Canceled {len(order_ids)} open orders for {symbol}",
         }
