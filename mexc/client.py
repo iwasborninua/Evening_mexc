@@ -199,12 +199,25 @@ class MexcClient:
     def get_position(self, symbol: str) -> dict[str, Any] | None:
         response = self.get_open_positions(symbol)
 
+        print("GET_OPEN_POSITIONS RESPONSE:", response)
+
         if not response.get("success"):
             return None
 
-        for item in response.get("data", []):
+        data = response.get("data") or []
+
+        # На случай если MEXC вернет объект, а не список
+        if isinstance(data, dict):
+            items = data.get("resultList") or data.get("list") or []
+        else:
+            items = data
+
+        for item in items:
+            item_symbol = str(item.get("symbol", "")).upper()
             hold_vol = float(item.get("holdVol", 0) or 0)
-            if item.get("symbol") == symbol and hold_vol > 0:
+            state = int(item.get("state", 0) or 0)
+
+            if item_symbol == symbol.upper() and hold_vol > 0 and state in (1, 2):
                 return item
 
         return None
@@ -292,18 +305,19 @@ class MexcClient:
     # -------------------------
 
     def place_order(
-        self,
-        *,
-        symbol: str,
-        price: float,
-        vol: float,
-        side: int,
-        order_type: int,
-        open_type: int,
-        leverage: int | None = None,
-        stop_loss_price: float | None = None,
-        take_profit_price: float | None = None,
-        external_oid: str | None = None,
+            self,
+            *,
+            symbol: str,
+            price: float,
+            vol: float,
+            side: int,
+            order_type: int,
+            open_type: int,
+            leverage: int | None = None,
+            stop_loss_price: float | None = None,
+            take_profit_price: float | None = None,
+            external_oid: str | None = None,
+            position_id: int | None = None,
     ) -> dict[str, Any]:
         payload = {
             "symbol": symbol,
@@ -316,6 +330,7 @@ class MexcClient:
             "stopLossPrice": stop_loss_price,
             "takeProfitPrice": take_profit_price,
             "externalOid": external_oid,
+            "positionId": position_id,
         }
 
         return self._request(
@@ -836,6 +851,7 @@ class MexcClient:
             close_vol = hold_vol
 
         position_type = int(position.get("positionType", 0) or 0)
+        open_type = int(position.get("openType", self.OPEN_TYPE_ISOLATED) or self.OPEN_TYPE_ISOLATED)
 
         if position_type == 1:
             close_side = self.SIDE_CLOSE_LONG
@@ -853,7 +869,7 @@ class MexcClient:
             vol=float(close_vol),
             side=close_side,
             order_type=self.ORDER_TYPE_MARKET,
-            open_type=self.OPEN_TYPE_CROSS,
+            open_type=open_type,
         )
 
     def handle_tp_partial_close(self, symbol: str, percent: int) -> dict[str, Any]:
