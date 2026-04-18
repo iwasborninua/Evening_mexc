@@ -9,9 +9,9 @@ from telethon import functions
 from telegram.client import create_client
 from telegram.auth import ensure_authorized
 from telegram.topic_listener import listen_selected_topics
+from app.logger import setup_logger
 
-from parser.signal_parser import parse_signal_message
-
+logger = setup_logger()
 
 
 async def main():
@@ -28,6 +28,7 @@ async def main():
                 settings.topic_low_cap_id,
                 settings.topic_mid_high_cap_id,
             ],
+            logger=logger
         )
 
     finally:

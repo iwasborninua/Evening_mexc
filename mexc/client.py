@@ -22,7 +22,7 @@ class MexcClient:
     OPEN_TYPE_ISOLATED = 1
     OPEN_TYPE_CROSS = 2
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, logger=None) -> None:
         self._contracts_cache: dict[str, dict[str, Any]] = {}
 
         self.base_url = settings.mexc_base_url.rstrip("/")
@@ -33,6 +33,32 @@ class MexcClient:
         self.session.headers.update({
             "Content-Type": "application/json",
         })
+        self.logger = logger
+
+    # -------------------------
+    # Logging helpers
+    # -------------------------
+
+    def _log_info(self, message: str, *args) -> None:
+        formatted = message % args if args else message
+        print(formatted)
+
+        if self.logger:
+            self.logger.info(message, *args)
+
+    def _log_error(self, message: str, *args) -> None:
+        formatted = message % args if args else message
+        print(formatted)
+
+        if self.logger:
+            self.logger.error(message, *args)
+
+    def _log_exception(self, message: str, *args) -> None:
+        formatted = message % args if args else message
+        print(formatted)
+
+        if self.logger:
+            self.logger.exception(message, *args)
 
     # -------------------------
     # Helpers
@@ -87,47 +113,81 @@ class MexcClient:
         headers: dict[str, str] = {}
         body = None
 
-        if private:
-            timestamp = self._now_ms()
+        self._log_info(
+            "HTTP request | method=%s | path=%s | private=%s | params=%s",
+            method,
+            path,
+            private,
+            params,
+        )
 
-            if method in ("GET", "DELETE"):
-                parameter_string = self._build_query_string(
-                    params if isinstance(params, dict) else {}
-                )
-            else:
-                if isinstance(params, dict):
-                    filtered_params = {
-                        k: v for k, v in params.items()
-                        if v is not None
-                    }
-                    body = json.dumps(
-                        filtered_params,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
+        try:
+            if private:
+                timestamp = self._now_ms()
+
+                if method in ("GET", "DELETE"):
+                    parameter_string = self._build_query_string(
+                        params if isinstance(params, dict) else {}
                     )
                 else:
-                    body = json.dumps(
-                        params,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    )
+                    if isinstance(params, dict):
+                        filtered_params = {
+                            k: v for k, v in params.items()
+                            if v is not None
+                        }
+                        body = json.dumps(
+                            filtered_params,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        )
+                    else:
+                        body = json.dumps(
+                            params,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        )
 
-                parameter_string = body
+                    parameter_string = body
 
-            signature = self._build_signature(timestamp, parameter_string)
-            headers = self._private_headers(timestamp, signature)
+                signature = self._build_signature(timestamp, parameter_string)
+                headers = self._private_headers(timestamp, signature)
 
-        if method == "GET":
-            response = self.session.get(url, params=params, headers=headers, timeout=15)
-        elif method == "DELETE":
-            response = self.session.delete(url, params=params, headers=headers, timeout=15)
-        elif method == "POST":
-            response = self.session.post(url, data=body, headers=headers, timeout=15)
-        else:
-            raise ValueError(f"Unsupported HTTP method: {method}")
+            if method == "GET":
+                response = self.session.get(url, params=params, headers=headers, timeout=15)
+            elif method == "DELETE":
+                response = self.session.delete(url, params=params, headers=headers, timeout=15)
+            elif method == "POST":
+                response = self.session.post(url, data=body, headers=headers, timeout=15)
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
 
-        response.raise_for_status()
-        return response.json()
+            self._log_info(
+                "HTTP response | method=%s | path=%s | status_code=%s",
+                method,
+                path,
+                response.status_code,
+            )
+
+            response.raise_for_status()
+            result = response.json()
+
+            self._log_info(
+                "HTTP response body | method=%s | path=%s | success=%s",
+                method,
+                path,
+                result.get("success"),
+            )
+
+            return result
+
+        except Exception as e:
+            self._log_exception(
+                "HTTP request failed | method=%s | path=%s | error=%s",
+                method,
+                path,
+                e,
+            )
+            raise
 
     @staticmethod
     def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
@@ -145,9 +205,12 @@ class MexcClient:
         return self._request("GET", "/api/v1/contract/detail")
 
     def load_contracts_cache(self) -> None:
+        self._log_info("Loading contracts cache")
+
         response = self.get_contracts()
 
         if not response.get("success"):
+            self._log_error("Failed to load contracts cache | response=%s", response)
             raise ValueError(f"Failed to load contracts: {response}")
 
         self._contracts_cache = {
@@ -156,11 +219,23 @@ class MexcClient:
             if item.get("symbol")
         }
 
+        self._log_info(
+            "Contracts cache loaded | count=%s",
+            len(self._contracts_cache),
+        )
+
     def get_contract_by_symbol(self, symbol: str) -> dict[str, Any] | None:
         if not self._contracts_cache:
             self.load_contracts_cache()
 
-        return self._contracts_cache.get(symbol)
+        contract = self._contracts_cache.get(symbol)
+
+        if contract:
+            self._log_info("Contract found | symbol=%s", symbol)
+        else:
+            self._log_error("Contract not found | symbol=%s", symbol)
+
+        return contract
 
     # -------------------------
     # Account / positions / orders
@@ -199,14 +274,18 @@ class MexcClient:
     def get_position(self, symbol: str) -> dict[str, Any] | None:
         response = self.get_open_positions(symbol)
 
-        print("GET_OPEN_POSITIONS RESPONSE:", response)
+        self._log_info("GET_OPEN_POSITIONS RESPONSE: %s", response)
 
         if not response.get("success"):
+            self._log_error(
+                "Failed get_open_positions | symbol=%s | response=%s",
+                symbol,
+                response,
+            )
             return None
 
         data = response.get("data") or []
 
-        # На случай если MEXC вернет объект, а не список
         if isinstance(data, dict):
             items = data.get("resultList") or data.get("list") or []
         else:
@@ -218,8 +297,15 @@ class MexcClient:
             state = int(item.get("state", 0) or 0)
 
             if item_symbol == symbol.upper() and hold_vol > 0 and state in (1, 2):
+                self._log_info(
+                    "Open position found | symbol=%s | hold_vol=%s | state=%s",
+                    symbol,
+                    hold_vol,
+                    state,
+                )
                 return item
 
+        self._log_info("Open position not found | symbol=%s", symbol)
         return None
 
     # -------------------------
@@ -234,6 +320,14 @@ class MexcClient:
         price_unit = Decimal(str(contract["priceUnit"]))
         value = Decimal(str(price))
         normalized = value.quantize(price_unit, rounding=ROUND_DOWN)
+
+        self._log_info(
+            "Price normalized | symbol=%s | input=%s | output=%s",
+            symbol,
+            price,
+            float(normalized),
+        )
+
         return float(normalized)
 
     def normalize_volume(self, symbol: str, vol: float) -> float:
@@ -249,6 +343,14 @@ class MexcClient:
             raise ValueError(f"Volume is less than minVol: {min_vol}")
 
         normalized = self._floor_to_step(value, vol_unit)
+
+        self._log_info(
+            "Volume normalized | symbol=%s | input=%s | output=%s",
+            symbol,
+            vol,
+            float(normalized),
+        )
+
         return float(normalized)
 
     # -------------------------
@@ -298,6 +400,15 @@ class MexcClient:
         if normalized_vol < min_vol:
             normalized_vol = min_vol
 
+        self._log_info(
+            "Volume calculated | symbol=%s | margin_usdt=%s | leverage=%s | price=%s | result=%s",
+            symbol,
+            margin_usdt,
+            leverage,
+            price,
+            float(normalized_vol),
+        )
+
         return float(normalized_vol)
 
     # -------------------------
@@ -305,19 +416,19 @@ class MexcClient:
     # -------------------------
 
     def place_order(
-            self,
-            *,
-            symbol: str,
-            price: float,
-            vol: float,
-            side: int,
-            order_type: int,
-            open_type: int,
-            leverage: int | None = None,
-            stop_loss_price: float | None = None,
-            take_profit_price: float | None = None,
-            external_oid: str | None = None,
-            position_id: int | None = None,
+        self,
+        *,
+        symbol: str,
+        price: float,
+        vol: float,
+        side: int,
+        order_type: int,
+        open_type: int,
+        leverage: int | None = None,
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
+        external_oid: str | None = None,
+        position_id: int | None = None,
     ) -> dict[str, Any]:
         payload = {
             "symbol": symbol,
@@ -333,12 +444,32 @@ class MexcClient:
             "positionId": position_id,
         }
 
-        return self._request(
+        self._log_info(
+            "Place order | symbol=%s | price=%s | vol=%s | side=%s | type=%s | open_type=%s | leverage=%s",
+            symbol,
+            price,
+            vol,
+            side,
+            order_type,
+            open_type,
+            leverage,
+        )
+
+        result = self._request(
             "POST",
             "/api/v1/private/order/create",
             params=payload,
             private=True,
         )
+
+        self._log_info(
+            "Place order result | symbol=%s | success=%s | result=%s",
+            symbol,
+            result.get("success"),
+            result,
+        )
+
+        return result
 
     def place_limit_order(
         self,
@@ -464,17 +595,35 @@ class MexcClient:
     # -------------------------
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
-        return self._request(
+        self._log_info("Cancel order | order_id=%s", order_id)
+
+        result = self._request(
             "POST",
             "/api/v1/private/order/cancel",
             params=[int(order_id)],
             private=True,
         )
 
+        self._log_info(
+            "Cancel order result | order_id=%s | success=%s | result=%s",
+            order_id,
+            result.get("success"),
+            result,
+        )
+
+        return result
+
     def cancel_limit_orders_by_symbol(self, symbol: str) -> dict[str, Any]:
+        self._log_info("Cancel limit orders by symbol | symbol=%s", symbol)
+
         open_orders = self.get_open_orders(symbol)
 
         if not open_orders.get("success"):
+            self._log_error(
+                "Failed get_open_orders for cancel limit | symbol=%s | response=%s",
+                symbol,
+                open_orders,
+            )
             return open_orders
 
         limit_order_ids: list[int] = []
@@ -485,12 +634,14 @@ class MexcClient:
                 limit_order_ids.append(int(item["orderId"]))
 
         if not limit_order_ids:
-            return {
+            result = {
                 "success": True,
                 "code": 0,
                 "data": [],
                 "message": f"No open limit orders for {symbol}",
             }
+            self._log_info("Cancel limit orders result | %s", result)
+            return result
 
         results = []
         for order_id in limit_order_ids:
@@ -499,17 +650,27 @@ class MexcClient:
                 "result": self.cancel_order(str(order_id)),
             })
 
-        return {
+        result = {
             "success": True,
             "code": 0,
             "data": results,
             "message": f"Canceled {len(limit_order_ids)} limit orders for {symbol}",
         }
 
+        self._log_info("Cancel limit orders result | symbol=%s | result=%s", symbol, result)
+        return result
+
     def cancel_all_open_orders_by_symbol(self, symbol: str) -> dict[str, Any]:
+        self._log_info("Cancel all open orders by symbol | symbol=%s", symbol)
+
         open_orders = self.get_open_orders(symbol)
 
         if not open_orders.get("success"):
+            self._log_error(
+                "Failed get_open_orders for cancel all | symbol=%s | response=%s",
+                symbol,
+                open_orders,
+            )
             return open_orders
 
         order_ids: list[int] = []
@@ -520,12 +681,14 @@ class MexcClient:
                 order_ids.append(int(order_id))
 
         if not order_ids:
-            return {
+            result = {
                 "success": True,
                 "code": 0,
                 "data": [],
                 "message": f"No open orders for {symbol}",
             }
+            self._log_info("Cancel all open orders result | %s", result)
+            return result
 
         results = []
         for order_id in order_ids:
@@ -535,12 +698,20 @@ class MexcClient:
                 "result": result,
             })
 
-        return {
+        final_result = {
             "success": True,
             "code": 0,
             "data": results,
             "message": f"Canceled {len(order_ids)} open orders for {symbol}",
         }
+
+        self._log_info(
+            "Cancel all open orders result | symbol=%s | result=%s",
+            symbol,
+            final_result,
+        )
+
+        return final_result
 
     # -------------------------
     # Fees / break-even
@@ -569,10 +740,13 @@ class MexcClient:
         if real_maker_fee is None or real_taker_fee is None:
             raise ValueError(f"Fee fields not found for {symbol}: {data}")
 
-        return {
+        result = {
             "maker": float(real_maker_fee),
             "taker": float(real_taker_fee),
         }
+
+        self._log_info("Fee rates | symbol=%s | result=%s", symbol, result)
+        return result
 
     def calculate_break_even_price(
         self,
@@ -600,6 +774,15 @@ class MexcClient:
 
         price_unit = Decimal(str(contract["priceUnit"]))
         normalized = be_price.quantize(price_unit, rounding=ROUND_DOWN)
+
+        self._log_info(
+            "Break-even price calculated | symbol=%s | entry_price=%s | is_long=%s | be_price=%s",
+            symbol,
+            entry_price,
+            is_long,
+            float(normalized),
+        )
+
         return float(normalized)
 
     def get_position_stop_order(
@@ -610,6 +793,11 @@ class MexcClient:
         response = self.get_position_stop_orders(symbol)
 
         if not response.get("success"):
+            self._log_error(
+                "Failed get_position_stop_orders | symbol=%s | response=%s",
+                symbol,
+                response,
+            )
             return None
 
         for item in response.get("data", []):
@@ -623,8 +811,19 @@ class MexcClient:
             if is_finished != 0:
                 continue
 
+            self._log_info(
+                "Position stop order found | symbol=%s | position_id=%s | stop_order_id=%s",
+                symbol,
+                position_id,
+                item.get("id"),
+            )
             return item
 
+        self._log_info(
+            "Position stop order not found | symbol=%s | position_id=%s",
+            symbol,
+            position_id,
+        )
         return None
 
     def change_position_stop_order(
@@ -655,12 +854,29 @@ class MexcClient:
             "takeProfitReverse": 2,
         }
 
-        return self._request(
+        self._log_info(
+            "Change position stop order | symbol=%s | stop_plan_order_id=%s | stop_loss=%s | take_profit=%s",
+            symbol,
+            stop_plan_order_id,
+            normalized_stop_loss_price,
+            normalized_take_profit_price,
+        )
+
+        result = self._request(
             "POST",
             "/api/v1/private/stoporder/change_plan_price",
             params=payload,
             private=True,
         )
+
+        self._log_info(
+            "Change position stop order result | symbol=%s | success=%s | result=%s",
+            symbol,
+            result.get("success"),
+            result,
+        )
+
+        return result
 
     def place_position_stop_order(
         self,
@@ -700,12 +916,30 @@ class MexcClient:
         if normalized_take_profit_price is not None:
             payload["takeProfitType"] = 0
 
-        return self._request(
+        self._log_info(
+            "Place position stop order | symbol=%s | position_id=%s | vol=%s | stop_loss=%s | take_profit=%s",
+            symbol,
+            position_id,
+            vol,
+            normalized_stop_loss_price,
+            normalized_take_profit_price,
+        )
+
+        result = self._request(
             "POST",
             "/api/v1/private/stoporder/place",
             params=payload,
             private=True,
         )
+
+        self._log_info(
+            "Place position stop order result | symbol=%s | success=%s | result=%s",
+            symbol,
+            result.get("success"),
+            result,
+        )
+
+        return result
 
     def move_stop_loss_to_break_even_with_symbol_fee(
         self,
@@ -716,6 +950,14 @@ class MexcClient:
         use_hold_avg_price: bool = False,
     ) -> dict[str, Any]:
         try:
+            self._log_info(
+                "Move SL to break-even | symbol=%s | entry_fee_type=%s | exit_fee_type=%s | use_hold_avg_price=%s",
+                symbol,
+                entry_fee_type,
+                exit_fee_type,
+                use_hold_avg_price,
+            )
+
             position = self.get_position(symbol)
             if position is None:
                 return {
@@ -772,7 +1014,7 @@ class MexcClient:
             if current_stop:
                 stop_plan_order_id = int(current_stop["id"])
 
-                return self.change_position_stop_order(
+                result = self.change_position_stop_order(
                     symbol=symbol,
                     stop_plan_order_id=stop_plan_order_id,
                     stop_loss_price=be_price,
@@ -780,8 +1022,10 @@ class MexcClient:
                     loss_trend=loss_trend,
                     profit_trend=int(current_stop.get("profitTrend", 1) or 1),
                 )
+                self._log_info("Move SL to break-even result | symbol=%s | result=%s", symbol, result)
+                return result
 
-            return self.place_position_stop_order(
+            result = self.place_position_stop_order(
                 symbol=symbol,
                 position_id=position_id,
                 vol=hold_vol,
@@ -792,7 +1036,11 @@ class MexcClient:
                 vol_type=2,
                 stop_loss_type=0,
             )
+            self._log_info("Move SL to break-even result | symbol=%s | result=%s", symbol, result)
+            return result
+
         except Exception as e:
+            self._log_exception("Move SL to break-even failed | symbol=%s | error=%s", symbol, e)
             return {
                 "success": False,
                 "error": str(e),
@@ -811,6 +1059,8 @@ class MexcClient:
     # -------------------------
 
     def close_position_partially(self, symbol: str, percent: int) -> dict[str, Any]:
+        self._log_info("Close position partially | symbol=%s | percent=%s", symbol, percent)
+
         if percent <= 0 or percent > 100:
             return {
                 "success": False,
@@ -863,7 +1113,15 @@ class MexcClient:
                 "error": f"Unknown positionType for {symbol}: {position_type}",
             }
 
-        return self.place_order(
+        self._log_info(
+            "Partial close calculated | symbol=%s | hold_vol=%s | close_vol=%s | close_side=%s",
+            symbol,
+            float(hold_vol),
+            float(close_vol),
+            close_side,
+        )
+
+        result = self.place_order(
             symbol=symbol,
             price=0,
             vol=float(close_vol),
@@ -872,7 +1130,18 @@ class MexcClient:
             open_type=open_type,
         )
 
+        self._log_info(
+            "Close position partially result | symbol=%s | success=%s | result=%s",
+            symbol,
+            result.get("success"),
+            result,
+        )
+
+        return result
+
     def handle_tp_partial_close(self, symbol: str, percent: int) -> dict[str, Any]:
+        self._log_info("Handle TP partial close | symbol=%s | percent=%s", symbol, percent)
+
         result: dict[str, Any] = {
             "success": True,
             "step": "handle_tp_partial_close",
@@ -887,6 +1156,7 @@ class MexcClient:
         if close_result.get("success") is False:
             result["success"] = False
             result["step"] = "close_position_partially"
+            self._log_error("Handle TP partial close failed | symbol=%s | result=%s", symbol, result)
             return result
 
         cancel_result = self.cancel_limit_orders_by_symbol(symbol)
@@ -901,4 +1171,5 @@ class MexcClient:
             if result["step"] == "handle_tp_partial_close":
                 result["step"] = "move_stop_loss_to_break_even"
 
+        self._log_info("Handle TP partial close result | symbol=%s | result=%s", symbol, result)
         return result
