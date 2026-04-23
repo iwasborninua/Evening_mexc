@@ -29,10 +29,12 @@ class MexcClient:
         self.api_key = settings.mexc_api_key
         self.api_secret = settings.mexc_api_secret
         self.recv_window = "10000"
+
         self.session = requests.Session()
         self.session.headers.update({
             "Content-Type": "application/json",
         })
+
         self.logger = logger
 
     # -------------------------
@@ -80,15 +82,14 @@ class MexcClient:
         if not params:
             return ""
 
-        filtered: dict[str, Any] = {
+        filtered = {
             k: v for k, v in params.items()
             if v is not None
         }
 
         pairs = []
         for key in sorted(filtered.keys()):
-            value = filtered[key]
-            pairs.append(f"{key}={value}")
+            pairs.append(f"{key}={filtered[key]}")
 
         return "&".join(pairs)
 
@@ -244,8 +245,19 @@ class MexcClient:
     def get_account_assets(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/private/account/assets", private=True)
 
-    def get_open_positions(self, symbol: str | None = None) -> dict[str, Any]:
-        params = {"symbol": symbol} if symbol else {}
+    def get_open_positions(
+        self,
+        symbol: str | None = None,
+        position_id: int | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+
+        if symbol:
+            params["symbol"] = symbol
+
+        if position_id is not None:
+            params["positionId"] = position_id
+
         return self._request(
             "GET",
             "/api/v1/private/position/open_positions",
@@ -272,7 +284,7 @@ class MexcClient:
         )
 
     def get_position(self, symbol: str) -> dict[str, Any] | None:
-        response = self.get_open_positions(symbol)
+        response = self.get_open_positions(symbol=symbol)
 
         self._log_info("GET_OPEN_POSITIONS RESPONSE: %s", response)
 
@@ -307,6 +319,168 @@ class MexcClient:
 
         self._log_info("Open position not found | symbol=%s", symbol)
         return None
+
+    # -------------------------
+    # Stop-order helpers
+    # -------------------------
+
+    def get_active_position_stop_orders(
+        self,
+        symbol: str,
+        position_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        response = self.get_position_stop_orders(symbol)
+
+        if not response.get("success"):
+            self._log_error(
+                "Failed get_position_stop_orders | symbol=%s | response=%s",
+                symbol,
+                response,
+            )
+            return []
+
+        result: list[dict[str, Any]] = []
+
+        for item in response.get("data", []):
+            item_symbol = str(item.get("symbol", "")).upper()
+            if item_symbol != symbol.upper():
+                continue
+
+            is_finished = int(item.get("isFinished", 0) or 0)
+            if is_finished != 0:
+                continue
+
+            if position_id is not None:
+                item_position_id = int(item.get("positionId", 0) or 0)
+                if item_position_id != position_id:
+                    continue
+
+            result.append(item)
+
+        self._log_info(
+            "Active stop orders found | symbol=%s | position_id=%s | count=%s",
+            symbol,
+            position_id,
+            len(result),
+        )
+        return result
+
+    def get_existing_take_profit_price(
+        self,
+        symbol: str,
+        position_id: int | None = None,
+    ) -> float | None:
+        """
+        Возвращает текущий TP из активных stop-order.
+        Если TP несколько и они одинаковые — вернет его.
+        Если разные — вернет первый и запишет предупреждение в лог.
+        """
+        stop_orders = self.get_active_position_stop_orders(
+            symbol=symbol,
+            position_id=position_id,
+        )
+
+        tp_values: list[float] = []
+
+        for item in stop_orders:
+            raw_tp = item.get("takeProfitPrice")
+            if raw_tp is None:
+                continue
+
+            try:
+                tp = float(raw_tp)
+            except (TypeError, ValueError):
+                continue
+
+            if tp > 0:
+                tp_values.append(tp)
+
+        if not tp_values:
+            self._log_info(
+                "Existing take profit not found | symbol=%s | position_id=%s",
+                symbol,
+                position_id,
+            )
+            return None
+
+        unique_tp = sorted(set(tp_values))
+
+        if len(unique_tp) > 1:
+            self._log_error(
+                "Multiple different TP values found | symbol=%s | position_id=%s | values=%s",
+                symbol,
+                position_id,
+                unique_tp,
+            )
+
+        take_profit_price = unique_tp[0]
+
+        self._log_info(
+            "Existing take profit found | symbol=%s | position_id=%s | take_profit_price=%s",
+            symbol,
+            position_id,
+            take_profit_price,
+        )
+        return take_profit_price
+
+    def cancel_stop_orders(self, stop_plan_order_ids: list[int]) -> dict[str, Any]:
+        """
+        Отмена конкретных stop-order.
+        """
+        payload = [{"stopPlanOrderId": int(x)} for x in stop_plan_order_ids]
+
+        self._log_info("Cancel stop orders | payload=%s", payload)
+
+        result = self._request(
+            "POST",
+            "/api/v1/private/stoporder/cancel",
+            params=payload,
+            private=True,
+        )
+
+        self._log_info(
+            "Cancel stop orders result | success=%s | result=%s",
+            result.get("success"),
+            result,
+        )
+        return result
+
+    def cancel_all_position_stop_orders(
+        self,
+        symbol: str,
+        position_id: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Отменяет все stop-order по позиции или символу.
+        """
+        self._log_info(
+            "Cancel all position stop orders | symbol=%s | position_id=%s",
+            symbol,
+            position_id,
+        )
+
+        payload: dict[str, Any] = {}
+
+        if position_id is not None:
+            payload["positionId"] = int(position_id)
+        else:
+            payload["symbol"] = symbol
+
+        result = self._request(
+            "POST",
+            "/api/v1/private/stoporder/cancel_all",
+            params=payload,
+            private=True,
+        )
+
+        self._log_info(
+            "Cancel all position stop orders result | symbol=%s | position_id=%s | success=%s | result=%s",
+            symbol,
+            position_id,
+            result.get("success"),
+            result,
+        )
+        return result
 
     # -------------------------
     # Normalization
@@ -591,7 +765,7 @@ class MexcClient:
         )
 
     # -------------------------
-    # Cancel orders
+    # Cancel regular orders
     # -------------------------
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
@@ -644,15 +818,21 @@ class MexcClient:
             return result
 
         results = []
+        has_errors = False
+
         for order_id in limit_order_ids:
+            cancel_result = self.cancel_order(str(order_id))
+            if not cancel_result.get("success"):
+                has_errors = True
+
             results.append({
                 "orderId": order_id,
-                "result": self.cancel_order(str(order_id)),
+                "result": cancel_result,
             })
 
         result = {
-            "success": True,
-            "code": 0,
+            "success": not has_errors,
+            "code": 0 if not has_errors else -1,
             "data": results,
             "message": f"Canceled {len(limit_order_ids)} limit orders for {symbol}",
         }
@@ -691,16 +871,21 @@ class MexcClient:
             return result
 
         results = []
+        has_errors = False
+
         for order_id in order_ids:
-            result = self.cancel_order(str(order_id))
+            cancel_result = self.cancel_order(str(order_id))
+            if not cancel_result.get("success"):
+                has_errors = True
+
             results.append({
                 "orderId": order_id,
-                "result": result,
+                "result": cancel_result,
             })
 
         final_result = {
-            "success": True,
-            "code": 0,
+            "success": not has_errors,
+            "code": 0 if not has_errors else -1,
             "data": results,
             "message": f"Canceled {len(order_ids)} open orders for {symbol}",
         }
@@ -764,7 +949,6 @@ class MexcClient:
         entry = Decimal(str(entry_price))
         open_fee = Decimal(str(open_fee_rate))
         close_fee = Decimal(str(close_fee_rate))
-
         total_fee = open_fee + close_fee
 
         if is_long:
@@ -785,99 +969,6 @@ class MexcClient:
 
         return float(normalized)
 
-    def get_position_stop_order(
-        self,
-        position_id: int,
-        symbol: str,
-    ) -> dict[str, Any] | None:
-        response = self.get_position_stop_orders(symbol)
-
-        if not response.get("success"):
-            self._log_error(
-                "Failed get_position_stop_orders | symbol=%s | response=%s",
-                symbol,
-                response,
-            )
-            return None
-
-        for item in response.get("data", []):
-            if int(item.get("positionId", 0) or 0) != position_id:
-                continue
-
-            if item.get("symbol") != symbol:
-                continue
-
-            is_finished = int(item.get("isFinished", 0) or 0)
-            if is_finished != 0:
-                continue
-
-            self._log_info(
-                "Position stop order found | symbol=%s | position_id=%s | stop_order_id=%s",
-                symbol,
-                position_id,
-                item.get("id"),
-            )
-            return item
-
-        self._log_info(
-            "Position stop order not found | symbol=%s | position_id=%s",
-            symbol,
-            position_id,
-        )
-        return None
-
-    def change_position_stop_order(
-        self,
-        *,
-        symbol: str,
-        stop_plan_order_id: int,
-        stop_loss_price: float | None,
-        take_profit_price: float | None,
-        loss_trend: int,
-        profit_trend: int,
-    ) -> dict[str, Any]:
-        normalized_stop_loss_price = None
-        if stop_loss_price is not None and stop_loss_price > 0:
-            normalized_stop_loss_price = self.normalize_price(symbol, stop_loss_price)
-
-        normalized_take_profit_price = None
-        if take_profit_price is not None and take_profit_price > 0:
-            normalized_take_profit_price = self.normalize_price(symbol, take_profit_price)
-
-        payload = {
-            "stopPlanOrderId": stop_plan_order_id,
-            "stopLossPrice": normalized_stop_loss_price,
-            "takeProfitPrice": normalized_take_profit_price,
-            "lossTrend": loss_trend,
-            "profitTrend": profit_trend,
-            "stopLossReverse": 2,
-            "takeProfitReverse": 2,
-        }
-
-        self._log_info(
-            "Change position stop order | symbol=%s | stop_plan_order_id=%s | stop_loss=%s | take_profit=%s",
-            symbol,
-            stop_plan_order_id,
-            normalized_stop_loss_price,
-            normalized_take_profit_price,
-        )
-
-        result = self._request(
-            "POST",
-            "/api/v1/private/stoporder/change_plan_price",
-            params=payload,
-            private=True,
-        )
-
-        self._log_info(
-            "Change position stop order result | symbol=%s | success=%s | result=%s",
-            symbol,
-            result.get("success"),
-            result,
-        )
-
-        return result
-
     def place_position_stop_order(
         self,
         *,
@@ -891,6 +982,8 @@ class MexcClient:
         vol_type: int,
         stop_loss_type: int,
     ) -> dict[str, Any]:
+        normalized_vol = self.normalize_volume(symbol, vol)
+
         normalized_stop_loss_price = None
         if stop_loss_price is not None and stop_loss_price > 0:
             normalized_stop_loss_price = self.normalize_price(symbol, stop_loss_price)
@@ -901,7 +994,7 @@ class MexcClient:
 
         payload = {
             "positionId": position_id,
-            "vol": vol,
+            "vol": normalized_vol,
             "stopLossPrice": normalized_stop_loss_price,
             "takeProfitPrice": normalized_take_profit_price,
             "lossTrend": loss_trend,
@@ -920,7 +1013,7 @@ class MexcClient:
             "Place position stop order | symbol=%s | position_id=%s | vol=%s | stop_loss=%s | take_profit=%s",
             symbol,
             position_id,
-            vol,
+            normalized_vol,
             normalized_stop_loss_price,
             normalized_take_profit_price,
         )
@@ -941,18 +1034,25 @@ class MexcClient:
 
         return result
 
-    def move_stop_loss_to_break_even_with_symbol_fee(
+    def place_break_even_stop_for_remaining_position(
         self,
         symbol: str,
         *,
+        take_profit_price: float | None = None,
         entry_fee_type: str = "maker",
         exit_fee_type: str = "taker",
         use_hold_avg_price: bool = False,
     ) -> dict[str, Any]:
+        """
+        Ставит один новый stop-order:
+        SL = BE
+        TP = сохраненный старый TP, если он был
+        """
         try:
             self._log_info(
-                "Move SL to break-even | symbol=%s | entry_fee_type=%s | exit_fee_type=%s | use_hold_avg_price=%s",
+                "Place BE stop for remaining position | symbol=%s | take_profit_price=%s | entry_fee_type=%s | exit_fee_type=%s | use_hold_avg_price=%s",
                 symbol,
+                take_profit_price,
                 entry_fee_type,
                 exit_fee_type,
                 use_hold_avg_price,
@@ -1009,47 +1109,46 @@ class MexcClient:
                 close_fee_rate=close_fee_rate,
             )
 
-            current_stop = self.get_position_stop_order(position_id, symbol)
-
-            if current_stop:
-                stop_plan_order_id = int(current_stop["id"])
-
-                result = self.change_position_stop_order(
-                    symbol=symbol,
-                    stop_plan_order_id=stop_plan_order_id,
-                    stop_loss_price=be_price,
-                    take_profit_price=current_stop.get("takeProfitPrice"),
-                    loss_trend=loss_trend,
-                    profit_trend=int(current_stop.get("profitTrend", 1) or 1),
-                )
-                self._log_info("Move SL to break-even result | symbol=%s | result=%s", symbol, result)
-                return result
-
             result = self.place_position_stop_order(
                 symbol=symbol,
                 position_id=position_id,
                 vol=hold_vol,
                 stop_loss_price=be_price,
-                take_profit_price=None,
+                take_profit_price=take_profit_price,
                 loss_trend=loss_trend,
                 profit_trend=1,
                 vol_type=2,
                 stop_loss_type=0,
             )
-            self._log_info("Move SL to break-even result | symbol=%s | result=%s", symbol, result)
+
+            self._log_info(
+                "Place BE stop for remaining position result | symbol=%s | result=%s",
+                symbol,
+                result,
+            )
             return result
 
         except Exception as e:
-            self._log_exception("Move SL to break-even failed | symbol=%s | error=%s", symbol, e)
+            self._log_exception(
+                "Place BE stop for remaining position failed | symbol=%s | error=%s",
+                symbol,
+                e,
+            )
             return {
                 "success": False,
                 "error": str(e),
-                "step": "move_stop_loss_to_break_even_with_symbol_fee",
+                "step": "place_break_even_stop_for_remaining_position",
             }
 
     def move_stop_loss_to_break_even(self, symbol: str) -> dict[str, Any]:
-        return self.move_stop_loss_to_break_even_with_symbol_fee(
+        """
+        Совместимость со старым кодом.
+        Важно: этот метод не сохраняет старый TP.
+        Для partial close используй handle_tp_partial_close().
+        """
+        return self.place_break_even_stop_for_remaining_position(
             symbol,
+            take_profit_price=None,
             entry_fee_type="maker",
             exit_fee_type="taker",
         )
@@ -1140,36 +1239,109 @@ class MexcClient:
         return result
 
     def handle_tp_partial_close(self, symbol: str, percent: int) -> dict[str, Any]:
+        """
+        Логика:
+        1. Частично закрываем позицию
+        2. Читаем актуальную позицию
+        3. Сохраняем старый TP
+        4. Отменяем все старые TP/SL
+        5. Если позиция осталась — ставим один новый stop-order:
+           SL = BE, TP = старый TP
+        6. Отменяем оставшиеся лимитные входы
+        """
         self._log_info("Handle TP partial close | symbol=%s | percent=%s", symbol, percent)
 
         result: dict[str, Any] = {
             "success": True,
             "step": "handle_tp_partial_close",
+            "symbol": symbol,
+            "percent": percent,
         }
-
-        be_result = self.move_stop_loss_to_break_even(symbol)
-        result["be_result"] = be_result
 
         close_result = self.close_position_partially(symbol, percent)
         result["close_result"] = close_result
 
-        if close_result.get("success") is False:
+        if not close_result.get("success"):
             result["success"] = False
             result["step"] = "close_position_partially"
-            self._log_error("Handle TP partial close failed | symbol=%s | result=%s", symbol, result)
+            self._log_error(
+                "Handle TP partial close failed on close step | symbol=%s | result=%s",
+                symbol,
+                result,
+            )
             return result
 
-        cancel_result = self.cancel_limit_orders_by_symbol(symbol)
-        result["cancel_result"] = cancel_result
+        time.sleep(0.7)
 
-        if cancel_result.get("success") is False:
+        position_after_close = self.get_position(symbol)
+        result["position_after_close"] = position_after_close
+
+        position_id = None
+        if position_after_close is not None:
+            position_id = int(position_after_close["positionId"])
+
+        preserved_take_profit_price = self.get_existing_take_profit_price(
+            symbol=symbol,
+            position_id=position_id,
+        )
+        result["preserved_take_profit_price"] = preserved_take_profit_price
+
+        cancel_stop_result = self.cancel_all_position_stop_orders(
+            symbol=symbol,
+            position_id=position_id,
+        )
+        result["cancel_stop_result"] = cancel_stop_result
+
+        if not cancel_stop_result.get("success"):
+            result["success"] = False
+            result["step"] = "cancel_all_position_stop_orders"
+            self._log_error(
+                "Handle TP partial close stopped: failed to cancel old stop orders | symbol=%s | result=%s",
+                symbol,
+                result,
+            )
+            return result
+
+        time.sleep(0.5)
+
+        if position_after_close is not None:
+            be_result = self.place_break_even_stop_for_remaining_position(
+                symbol,
+                take_profit_price=preserved_take_profit_price,
+            )
+            result["be_result"] = be_result
+
+            if not be_result.get("success"):
+                result["success"] = False
+                result["step"] = "place_break_even_stop_for_remaining_position"
+                self._log_error(
+                    "Handle TP partial close failed on BE step | symbol=%s | result=%s",
+                    symbol,
+                    result,
+                )
+                return result
+        else:
+            result["be_result"] = {
+                "success": True,
+                "message": f"Position fully closed for {symbol}, new BE stop is not required",
+            }
+
+        cancel_limit_result = self.cancel_limit_orders_by_symbol(symbol)
+        result["cancel_limit_result"] = cancel_limit_result
+
+        if not cancel_limit_result.get("success"):
             result["success"] = False
             result["step"] = "cancel_limit_orders_by_symbol"
+            self._log_error(
+                "Handle TP partial close failed on cancel limit orders step | symbol=%s | result=%s",
+                symbol,
+                result,
+            )
+            return result
 
-        if be_result.get("success") is False:
-            result["success"] = False
-            if result["step"] == "handle_tp_partial_close":
-                result["step"] = "move_stop_loss_to_break_even"
-
-        self._log_info("Handle TP partial close result | symbol=%s | result=%s", symbol, result)
+        self._log_info(
+            "Handle TP partial close result | symbol=%s | result=%s",
+            symbol,
+            result,
+        )
         return result
