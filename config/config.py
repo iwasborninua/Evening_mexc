@@ -34,5 +34,5 @@ def load_settings() -> Settings:
         mexc_api_secret=os.getenv("MEXC_API_SECRET"),
         mexc_base_url=os.getenv("MEXC_BASE_URL", "https://api.mexc.com"),
         trading_margin=float(os.getenv("TRADING_MARGIN", "2")),
-        parthial_percent=int(os.getenv("PARTIAL_PERCENT", "20")),
+        partial_percent=int(os.getenv("PARTIAL_PERCENT", "20")),
     )
