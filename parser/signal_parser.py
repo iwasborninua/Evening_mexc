@@ -31,33 +31,30 @@ def extract_symbol(text: str) -> str | None:
         return None
     return f"{asset.group(1).upper()}_USDT"
 
-
 def parse_followup_message(text: str) -> dict[str, Any] | None:
     """
     Разбирает follow-up сообщения, например:
-    - $XPL hit TP2, close 60% vol - move SL to BE
-    - $JST hit 2 entry +39% profit, close 10% vol - move SL to BE
-    - $SOL closed
+    - $XPL hit TP2 - move SL to BE
+    - $JST hit 2 entry +39% profit - move SL to BE
+    - $JST close vol - move SL to BE
+    - $JST partial close - move SL to BE
     - $DOGE cancel
 
-    Возвращает словарь с распарсенными данными
-    либо None, если это не follow-up сообщение.
+    Процент частичного закрытия НЕ парсится из сообщения.
+    Если сообщение означает частичное закрытие — процент берётся из settings.partial_percent.
     """
     symbol = extract_symbol(text)
     if not symbol:
         return None
 
-    # Отмена сигнала / закрытие
-    cancel_match = re.search(r"\b(?:cancel(?:led)?|closed)\b", text, re.IGNORECASE)
-
-    # Процент частичного закрытия: close 10% / close 60% vol
-    close_match = re.search(
-        r"\bclose\s+(\d+)%(?:\s*vol)?\b",
+    # Только отмена сигнала / ордеров.
+    # closed НЕ используем здесь, чтобы не спутать с partial closed.
+    cancel_match = re.search(
+        r"\b(?:cancel|cancelled)\b",
         text,
         re.IGNORECASE,
     )
 
-    # Перевод стопа в безубыток
     has_be = bool(
         re.search(
             r"\b(?:move\s+SL\s+to\s+BE|SL\s+to\s+BE|move\s+to\s+BE|BE)\b",
@@ -87,6 +84,26 @@ def parse_followup_message(text: str) -> dict[str, Any] | None:
         re.IGNORECASE,
     )
 
+    # Частичное закрытие без парсинга процента.
+    # Поддерживает старые и новые форматы:
+    # close 10% vol, close vol, close position, partial close, partially closed
+    partial_close_match = re.search(
+        r"\b(?:"
+        r"partial\s+close|"
+        r"partially\s+closed|"
+        r"close\s+\d+%(?:\s*vol)?|"
+        r"close\s+vol|"
+        r"close\s+volume|"
+        r"close\s+position|"
+        r"close\s+part|"
+        r"take\s+partial|"
+        r"close\s+some|"
+        r"close\s+position\s+partially"
+        r")\b",
+        text,
+        re.IGNORECASE,
+    )
+
     tp_number = None
     if tp_match:
         tp_number = tp_match.group(1) or tp_match.group(2)
@@ -95,12 +112,18 @@ def parse_followup_message(text: str) -> dict[str, Any] | None:
     if entry_hit_match:
         entry_number = entry_hit_match.group(1) or entry_hit_match.group(2)
 
-    close_percent = int(close_match.group(1)) if close_match else None
     profit_percent = float(profit_match.group(1)) if profit_match else None
+
+    should_partial_close = any([
+        partial_close_match,
+        tp_match and has_be,
+        profit_match and has_be,
+        entry_hit_match and has_be,
+    ])
 
     is_followup = any([
         cancel_match,
-        close_match,
+        should_partial_close,
         has_be,
         tp_match,
         entry_hit_match,
@@ -113,7 +136,7 @@ def parse_followup_message(text: str) -> dict[str, Any] | None:
     return {
         "symbol": symbol,
         "cancel": bool(cancel_match),
-        "close_percent": close_percent,
+        "close_percent": settings.partial_percent if should_partial_close else None,
         "move_to_be": has_be,
         "tp_number": int(tp_number) if tp_number else None,
         "entry_number": int(entry_number) if entry_number else None,
